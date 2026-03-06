@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-EAP3 完整审批流程 - 最终修复版
-豆爸专用
+EAP3 完整审批流程 - 最终版
+豆爸专用 - 自动完成审批
 """
 
 import asyncio
@@ -43,8 +43,152 @@ def api_login():
         log(f"API登录失败: {e}")
         return None
 
+async def find_and_click_todo(page, user_name):
+    """在工作台找到并点击指定用户的待办"""
+    # 等待页面加载
+    await page.wait_for_timeout(5000)
+    
+    # 获取所有frames
+    frames = page.frames
+    
+    for frame in frames:
+        try:
+            # 查找所有表格行
+            rows = await frame.query_selector_all('tr')
+            for row in rows:
+                try:
+                    text = await row.inner_text()
+                    # 检查是否包含该用户和XZ38
+                    if user_name in text and 'XZ38' in text:
+                        # 尝试点击行内的链接
+                        links = await row.query_selector_all('a')
+                        for link in links:
+                            try:
+                                href = await link.get_attribute('href')
+                                if href:
+                                    # 直接导航到链接
+                                    full_url = href if href.startswith('http') else f"{EAP3_URL}{href if href.startswith('/') else '/' + href}"
+                                    log(f"  导航到: {full_url[:60]}...")
+                                    await page.goto(full_url, timeout=60000)
+                                    await page.wait_for_timeout(8000)
+                                    return True
+                            except:
+                                pass
+                        
+                        # 如果没有链接，尝试点击行本身
+                        try:
+                            await row.click()
+                            await page.wait_for_timeout(8000)
+                            return True
+                        except:
+                            pass
+                except:
+                    pass
+        except:
+            pass
+    
+    return False
+
+async def approve_detail_page(page):
+    """在详情页完成审批"""
+    await page.wait_for_timeout(5000)
+    
+    # 截图看详情页状态
+    screenshot = f"/root/.openclaw/logs/eap3_approval_{datetime.now().strftime('%H%M%S')}.png"
+    await page.screenshot(path=screenshot, full_page=True)
+    log(f"  详情页截图: {screenshot}")
+    
+    # 1. 尝试点击"接收办理"
+    for btn_text in ['接收办理', '办理', '接收']:
+        try:
+            # 尝试不同的选择器
+            for selector in [f'text={btn_text}', f'button:has-text("{btn_text}")', f'[value="{btn_text}"]']:
+                try:
+                    await page.click(selector, timeout=2000)
+                    log(f"  点击: {btn_text}")
+                    await page.wait_for_timeout(3000)
+                    break
+                except:
+                    pass
+            else:
+                continue
+            break
+        except:
+            pass
+    
+    # 2. 点击"确定"
+    for btn_text in ['确定', '确认']:
+        try:
+            for selector in [f'text={btn_text}', f'button:has-text("{btn_text}")']:
+                try:
+                    await page.click(selector, timeout=2000)
+                    log(f"  点击: {btn_text}")
+                    await page.wait_for_timeout(3000)
+                    break
+                except:
+                    pass
+            else:
+                continue
+            break
+        except:
+            pass
+    
+    # 3. 选择意见"已核实请后台支持"
+    try:
+        # 先点击意见选择区域
+        await page.click('text=意见', timeout=3000)
+        await page.wait_for_timeout(1000)
+    except:
+        pass
+    
+    try:
+        await page.click('text=已核实请后台支持', timeout=3000)
+        log("  选择意见: 已核实请后台支持")
+        await page.wait_for_timeout(2000)
+    except:
+        # 尝试radio按钮
+        try:
+            radios = await page.query_selector_all('input[type="radio"]')
+            for radio in radios:
+                try:
+                    value = await radio.get_attribute('value')
+                    if value and '核实' in value:
+                        await radio.click()
+                        log("  选择radio: 已核实请后台支持")
+                        await page.wait_for_timeout(2000)
+                        break
+                except:
+                    pass
+        except:
+            pass
+    
+    # 4. 点击"提交"
+    for btn_text in ['提交', '发送', '确定']:
+        try:
+            for selector in [f'text={btn_text}', f'button:has-text("{btn_text}")', f'input[type="submit"][value="{btn_text}"]']:
+                try:
+                    await page.click(selector, timeout=2000)
+                    log(f"  点击: {btn_text}")
+                    await page.wait_for_timeout(5000)
+                    break
+                except:
+                    pass
+            else:
+                continue
+            break
+        except:
+            pass
+    
+    # 截图看结果
+    await page.wait_for_timeout(3000)
+    result_screenshot = f"/root/.openclaw/logs/eap3_result_{datetime.now().strftime('%H%M%S')}.png"
+    await page.screenshot(path=result_screenshot, full_page=True)
+    log(f"  结果截图: {result_screenshot}")
+    
+    return True
+
 async def approve_todos(sid):
-    """审批待办"""
+    """审批所有待办"""
     approved_list = []
     
     async with async_playwright() as p:
@@ -66,209 +210,78 @@ async def approve_todos(sid):
                 log("待办任务标签未找到")
             
             # 截图
-            screenshot_path = f"/root/.openclaw/logs/eap3_debug_{datetime.now().strftime('%H%M%S')}.png"
-            await page.screenshot(path=screenshot_path, full_page=True)
-            log(f"✓ 截图: {screenshot_path}")
+            await page.screenshot(path=f"/root/.openclaw/logs/eap3_start_{datetime.now().strftime('%H%M%S')}.png", full_page=True)
             
-            # 等待表格加载
-            await page.wait_for_timeout(5000)
-            
-            # 获取所有frames
+            # 获取所有待办
             frames = page.frames
-            log(f"页面有 {len(frames)} 个frame")
+            todo_users = set()
             
-            # 收集所有包含XZ38的待办
-            todo_list = []
-            seen_users = set()
-            
-            for frame_idx, frame in enumerate(frames):
+            for frame in frames:
                 try:
-                    # 查找所有元素
-                    all_elems = await frame.query_selector_all('*')
-                    log(f"Frame {frame_idx}: 找到 {len(all_elems)} 个元素")
-                    
-                    # 调试：输出包含XZ38的元素
-                    for elem in all_elems:
+                    rows = await frame.query_selector_all('tr')
+                    for row in rows:
                         try:
-                            text = await elem.inner_text()
-                            if text and 'XZ38' in text:
-                                log(f"  Found XZ38: {text[:60]}...")
-                            if not text or 'XZ38' not in text:
-                                continue
-                            
-                            # 提取申请人（姓名-XZ38-2026xxxx 或 XZ38-2026xxxx-姓名）
-                            # 尝试两种格式
-                            match = re.search(r'([\u4e00-\u9fa5]{2,4})-XZ38-202\d{5}', text)
-                            if match:
-                                user_name = match.group(1)
-                            else:
-                                match = re.search(r'XZ38-202\d{5}-([\u4e00-\u9fa5]{2,4})', text)
+                            text = await row.inner_text()
+                            if 'XZ38' in text:
+                                # 提取申请人
+                                match = re.search(r'([\u4e00-\u9fa5]{2,4})-XZ38-202\d{5}', text)
                                 if match:
                                     user_name = match.group(1)
-                                else:
-                                    continue
-                            
-                            if user_name in seen_users:
-                                continue
-                            
-                            seen_users.add(user_name)
-                            
-                            # 查找可点击的父元素
-                            clickable = elem
-                            try:
-                                # 向上查找<a>标签
-                                parent_a = await elem.evaluate('el => el.closest("a")')
-                                if parent_a:
-                                    clickable = parent_a
-                                    log(f"    找到<a>父元素")
-                                else:
-                                    # 如果没有<a>，尝试点击<td>或<tr>
-                                    parent_td = await elem.evaluate('el => el.closest("td")')
-                                    if parent_td:
-                                        clickable = parent_td
-                                        log(f"    使用<td>元素")
-                            except Exception as e:
-                                log(f"    查找父元素失败: {e}")
-                            
-                            todo_list.append({
-                                'user': user_name,
-                                'text': text.strip()[:100],
-                                'element': clickable
-                            })
-                            log(f"  ✓ 待办: {user_name}")
-                            
-                        except Exception as e:
+                                    if user_name not in todo_users:
+                                        todo_users.add(user_name)
+                                        log(f"  发现待办: {user_name}")
+                        except:
                             pass
-                            
-                except Exception as e:
-                    log(f"Frame {frame_idx} 错误: {e}")
+                except:
+                    pass
             
-            log(f"\n共找到 {len(todo_list)} 个待办")
+            log(f"\n共找到 {len(todo_users)} 个待办")
             
-            if len(todo_list) == 0:
+            if len(todo_users) == 0:
                 log("无待办")
                 return approved_list
             
             # 逐个审批
-            for i, todo in enumerate(todo_list, 1):
-                log(f"\n[{i}/{len(todo_list)}] 处理: {todo['user']}")
+            for i, user_name in enumerate(sorted(todo_users), 1):
+                log(f"\n[{i}/{len(todo_users)}] 审批: {user_name}")
                 
                 try:
-                    # 如果不是第一个，重新定位元素
-                    if i > 1:
-                        log("  重新定位...")
-                        found = False
-                        current_frames = page.frames
-                        for frame in current_frames:
-                            try:
-                                elems = await frame.query_selector_all('*')
-                                for elem in elems:
-                                    try:
-                                        text = await elem.inner_text()
-                                        if text and todo['user'] in text and 'XZ38' in text:
-                                            # 找到可点击元素
-                                            try:
-                                                parent_a = await elem.evaluate('el => el.closest("a")')
-                                                if parent_a:
-                                                    todo['element'] = parent_a
-                                                else:
-                                                    todo['element'] = elem
-                                            except:
-                                                todo['element'] = elem
-                                            found = True
-                                            break
-                                    except:
-                                        pass
-                                if found:
-                                    break
-                            except:
-                                pass
-                        
-                        if not found:
-                            log(f"  ✗ 重新定位失败")
-                            approved_list.append({'user': todo['user'], 'status': 'failed', 'error': '重新定位失败'})
-                            continue
+                    # 返回工作台
+                    await page.goto(f"{EAP3_URL}/r/w?sid={sid}&cmd=com.actionsoft.apps.workbench_main_page", timeout=60000)
+                    await page.wait_for_timeout(3000)
                     
-                    # 点击元素
+                    # 点击待办任务
                     try:
-                        await todo['element'].click()
-                        log("  点击元素")
-                    except Exception as e:
-                        log(f"  点击失败: {e}")
-                        try:
-                            await todo['element'].evaluate('el => el.click()')
-                            log("  JS点击")
-                        except:
-                            pass
-                    
-                    await page.wait_for_timeout(10000)
-                    
-                    # 截图看详情页
-                    detail_screenshot = f"/root/.openclaw/logs/eap3_detail_{todo['user']}_{datetime.now().strftime('%H%M%S')}.png"
-                    await page.screenshot(path=detail_screenshot, full_page=True)
-                    log(f"  详情页: {detail_screenshot}")
-                    
-                    # 尝试各种可能的按钮文字
-                    # 1. 接收/办理
-                    for btn_text in ['接收办理', '接收', '办理', '同意', '审批']:
-                        try:
-                            await page.click(f'text={btn_text}', timeout=2000)
-                            log(f"  点击: {btn_text}")
-                            await page.wait_for_timeout(3000)
-                            break
-                        except:
-                            pass
-                    
-                    # 2. 确定
-                    try:
-                        await page.click('text=确定', timeout=3000)
-                        log("  点击: 确定")
+                        await page.click('text=待办任务', timeout=3000)
                         await page.wait_for_timeout(3000)
                     except:
                         pass
                     
-                    # 3. 选择意见
-                    try:
-                        await page.click('text=已核实请后台支持', timeout=3000)
-                        log("  选择意见")
-                        await page.wait_for_timeout(2000)
-                    except:
-                        pass
-                    
-                    # 4. 提交
-                    for btn_text in ['提交', '发送', '确定', '办理']:
-                        try:
-                            await page.click(f'text={btn_text}', timeout=2000)
-                            log(f"  点击: {btn_text}")
-                            await page.wait_for_timeout(5000)
-                            break
-                        except:
-                            pass
-                    
-                    # 记录成功
-                    approved_list.append({
-                        'time': datetime.now().isoformat(),
-                        'user': todo['user'],
-                        'status': 'approved'
-                    })
-                    log(f"✓ {todo['user']} 审批完成")
-                    
-                    # 返回工作台
-                    if i < len(todo_list):
-                        log("  返回工作台...")
-                        await page.goto(f"{EAP3_URL}/r/w?sid={sid}&cmd=com.actionsoft.apps.workbench_main_page", timeout=60000)
-                        await page.wait_for_timeout(5000)
-                        try:
-                            await page.click('text=待办任务', timeout=3000)
-                            await page.wait_for_timeout(3000)
-                        except:
-                            pass
-                    
+                    # 找到并点击待办
+                    if await find_and_click_todo(page, user_name):
+                        # 完成审批
+                        await approve_detail_page(page)
+                        
+                        approved_list.append({
+                            'time': datetime.now().isoformat(),
+                            'user': user_name,
+                            'status': 'approved'
+                        })
+                        log(f"✓ {user_name} 审批完成")
+                    else:
+                        log(f"✗ 无法点击 {user_name} 的待办")
+                        approved_list.append({
+                            'time': datetime.now().isoformat(),
+                            'user': user_name,
+                            'status': 'failed',
+                            'error': '无法点击'
+                        })
+                
                 except Exception as e:
                     log(f"✗ 审批失败: {e}")
                     approved_list.append({
                         'time': datetime.now().isoformat(),
-                        'user': todo['user'],
+                        'user': user_name,
                         'status': 'failed',
                         'error': str(e)
                     })
