@@ -1,0 +1,436 @@
+name: TGM1N塑壳断路器智能选型
+version: "2.0"
+description: TGM1N系列选型计算、型号生成与EAP3价格查询
+
+trigger:
+  - keyword: "#tgm1n"
+  - pattern: "TGM1N.*选型"
+  - pattern: "TGM1N.*价格"
+  - pattern: "塑壳.*选型"
+
+# 输入参数
+inputs:
+  query:
+    type: string
+    description: 用户查询内容
+    example: "TGM1N 125/3P 63A 带分励AC220V"
+
+# 工作流节点
+nodes:
+  # ========== 节点1: 解析输入参数 ==========
+  - id: parse_input
+    type: code
+    name: 解析选型参数
+    description: 从用户输入提取壳架、电流、极数、附件等参数
+    config:
+      language: python
+      code: |
+        import re
+        
+        query = inputs.get('query', '')
+        q_upper = query.upper()
+        
+        # 提取壳架电流
+        frame_match = re.search(r'TGM1N-?(\d+)', q_upper)
+        frame = frame_match.group(1) if frame_match else None
+        
+        # 如果没有明确壳架，尝试从电流推断
+        if not frame:
+          current_match = re.search(r'(\d+)\s*[Aa]', query)
+          if current_match:
+            current = int(current_match.group(1))
+            # 推断壳架
+            frames = [63, 125, 160, 250, 320, 400, 630, 800, 1250, 1600]
+            for f in frames:
+              if current <= f:
+                frame = str(f)
+                break
+        
+        # 提取极数
+        poles = '3'  # 默认3P
+        if '3N' in q_upper or '3+N' in q_upper:
+          poles = '3N'
+        elif '4P' in q_upper or '/4' in q_upper or '四极' in query:
+          poles = '4'
+        elif '2P' in q_upper or '/2' in q_upper or '二极' in query:
+          poles = '2'
+        
+        # 提取电流
+        current_match = re.search(r'(\d+)\s*[Aa](?![A-Za-z])', query)
+        current = int(current_match.group(1)) if current_match else 0
+        
+        # 如果没有电流但有壳架，默认使用壳架电流
+        if current == 0 and frame:
+          current = int(frame)
+        
+        # 确定分段（默认M型）
+        breaking = 'M'  # 默认较高型
+        if 'L型' in query or '/L' in q_upper:
+          breaking = 'L'
+        elif 'M型' in query or '/M' in q_upper:
+          breaking = 'M'
+        elif 'H型' in query or '/H' in q_upper:
+          breaking = 'H'
+        elif 'R型' in query or '/R' in q_upper:
+          breaking = 'R'
+        
+        # 确定附件代码
+        accessory = '00'  # 默认无附件
+        if any(kw in query for kw in ['分励', '分励脱扣']):
+          if any(kw in query for kw in ['辅助', '辅助触头']):
+            accessory = '40'  # 分励+辅助
+          elif any(kw in query for kw in ['报警', '报警触头']):
+            accessory = '18'  # 分励+报警
+          else:
+            accessory = '10'  # 仅分励
+        elif any(kw in query for kw in ['欠压', '欠压脱扣']):
+          if any(kw in query for kw in ['辅助']):
+            accessory = '70'  # 欠压+辅助
+          else:
+            accessory = '30'  # 仅欠压
+        elif any(kw in query for kw in ['辅助']):
+          if any(kw in query for kw in ['报警']):
+            accessory = '28'  # 辅助+报警
+          else:
+            accessory = '20'  # 仅辅助
+        
+        # 提取电压
+        voltage = 'AC220V'  # 默认
+        if 'AC380' in q_upper or '380V' in query:
+          voltage = 'AC380V'
+        elif 'DC24' in q_upper or '24V' in query:
+          voltage = 'DC24V'
+        elif 'AC220' in q_upper or '220V' in query:
+          voltage = 'AC220V'
+        
+        # 特殊标识
+        special = []
+        if '电动机' in query or '电机' in query:
+          special.append('电动机保护')
+        if 'Ⅲ' in query or '过载报警' in query:
+          special.append('过载报警不脱扣')
+        if '透明' in query or 'T' in q_upper:
+          special.append('透明盖')
+        if '板后' in query or 'B' in q_upper:
+          special.append('板后接线')
+        if '插入' in query or 'C' in q_upper:
+          special.append('插入式')
+        
+        outputs['parsed'] = {
+          'frame': frame or '125',
+          'current': current or 63,
+          'poles': poles,
+          'breaking': breaking,
+          'accessory': accessory,
+          'voltage': voltage,
+          'special': special,
+          'original_query': query
+        }
+    output:
+      parsed: "${outputs.parsed}"
+
+  # ========== 节点2: 验证电流规格 ==========
+  - id: validate_current
+    type: code
+    name: 验证电流规格
+    description: 验证电流是否在壳架的规格范围内
+    depends_on: [parse_input]
+    config:
+      language: python
+      code: |
+        parsed = inputs['parse_input']['parsed']
+        frame = parsed['frame']
+        current = parsed['current']
+        
+        # 各壳架的电流规格
+        current_specs = {
+          '63': [10, 16, 20, 25, 32, 40, 50, 63],
+          '125': [10, 16, 20, 25, 32, 40, 50, 63, 80, 100, 125],
+          '160': [16, 20, 25, 32, 40, 50, 60, 63, 70, 75, 80, 100, 125, 140, 150, 160],
+          '250': [100, 125, 140, 150, 160, 170, 180, 200, 225, 250],
+          '320': [100, 125, 140, 150, 160, 170, 180, 200, 225, 250, 270, 280, 300, 315, 320],
+          '400': [250, 280, 300, 315, 320, 350, 380, 400],
+          '630': [400, 450, 500, 550, 600, 630],
+          '800': [630, 700, 800],
+          '1250': [630, 700, 800, 1000, 1250],
+          '1600': [1000, 1250, 1500, 1600]
+        }
+        
+        specs = current_specs.get(frame, [])
+        
+        # 验证电流是否在规格内
+        if current not in specs and specs:
+          # 找到最接近的规格
+          closest = min(specs, key=lambda x: abs(x - current))
+          outputs['warning'] = f'{frame}壳架的电流规格为{specs}，{current}A不在规格内，建议使用{closest}A'
+          current = closest
+        
+        outputs['validated_current'] = current
+        outputs['validated_params'] = {
+          **parsed,
+          'current': current
+        }
+    output:
+      validated_current: "${outputs.validated_current}"
+      validated_params: "${outputs.validated_params}"
+      warning: "${outputs.warning}"
+
+  # ========== 节点3: 生成分断能力建议 ==========
+  - id: recommend_breaking
+    type: code
+    name: 分断能力建议
+    description: 根据壳架推荐分断能力
+    depends_on: [validate_current]
+    config:
+      language: python
+      code: |
+        params = inputs['validate_current']['validated_params']
+        frame = params['frame']
+        breaking = params['breaking']
+        
+        # 分断能力参考
+        breaking_options = {
+          '63': {'L': '25kA', 'M': '35kA', 'H': '50kA'},
+          '125': {'L': '25kA', 'M': '35kA', 'H': '50kA', 'R': '70kA'},
+          '160': {'L': '35kA', 'M': '50kA', 'H': '70kA', 'R': '85kA'},
+          '250': {'L': '35kA', 'M': '50kA', 'H': '70kA', 'R': '85kA'},
+          '320': {'L': '35kA', 'M': '50kA', 'H': '70kA', 'R': '85kA'},
+          '400': {'L': '35kA', 'M': '50kA', 'H': '70kA', 'R': '100kA'},
+          '630': {'L': '35kA', 'M': '50kA', 'H': '70kA'},
+          '800': {'L': '50kA', 'M': '70kA', 'H': '100kA'},
+          '1250': {'L': '80kA', 'M': '65kA', 'H': '80kA'},
+          '1600': {'M': '50kA', 'H': '100kA'}
+        }
+        
+        options = breaking_options.get(frame, {})
+        breaking_capacity = options.get(breaking, options.get('M', '50kA'))
+        
+        outputs['breaking_capacity'] = breaking_capacity
+        outputs['breaking_options'] = options
+        outputs['params_with_breaking'] = {
+          **params,
+          'breaking_capacity': breaking_capacity
+        }
+    output:
+      breaking_capacity: "${outputs.breaking_capacity}"
+      breaking_options: "${outputs.breaking_options}"
+      params_with_breaking: "${outputs.params_with_breaking}"
+
+  # ========== 节点4: 生成完整型号 ==========
+  - id: generate_model
+    type: code
+    name: 生成完整型号
+    description: 根据所有参数生成标准型号
+    depends_on: [recommend_breaking]
+    config:
+      language: python
+      code: |
+        params = inputs['recommend_breaking']['params_with_breaking']
+        
+        frame = params['frame']
+        current = params['current']
+        poles = params['poles']
+        breaking = params['breaking']
+        accessory = params['accessory']
+        voltage = params['voltage']
+        special = params['special']
+        
+        # 基础型号
+        # TGM1N-[壳架][分段]/[极数][脱扣][附件]
+        # 脱扣：配电用3，电动机用2（附件代码后加2）
+        
+        trip = '2' if '电动机保护' in special else '3'
+        
+        # 如果电动机保护，附件代码后加2
+        if trip == '2':
+          accessory_with_trip = accessory + '2'
+        else:
+          accessory_with_trip = accessory
+        
+        # 极数编码
+        if poles == '3N':
+          poles_code = '3N300'  # 3N A型（默认）
+        elif poles == '4':
+          poles_code = '4' + trip + accessory_with_trip + 'B'  # 4P B型（默认）
+        elif poles == '2':
+          poles_code = '2' + trip + accessory_with_trip
+        else:  # 3P
+          poles_code = '3' + trip + accessory_with_trip
+        
+        # 构建基础型号
+        if poles in ['3N']:
+          base_model = f"TGM1N-{frame}{breaking}/{poles_code}A"
+        else:
+          base_model = f"TGM1N-{frame}{breaking}/{poles_code}"
+        
+        # 添加特殊后缀
+        suffix = ''
+        if '过载报警不脱扣' in special:
+          suffix += 'Ⅲ'
+        if '透明盖' in special:
+          suffix += 'T'
+        if '板后接线' in special:
+          suffix += 'B'
+        if '插入式' in special:
+          suffix += 'C'
+        
+        if suffix:
+          full_model = f"{base_model}{suffix} {current}A {voltage}(祥云3.0)"
+        else:
+          full_model = f"{base_model} {current}A {voltage}(祥云3.0)"
+        
+        # 生成搜索关键词
+        search_keyword = f"TGM1N-{frame}{breaking}/{poles_code} {current}A"
+        
+        outputs['base_model'] = base_model
+        outputs['full_model'] = full_model
+        outputs['search_keyword'] = search_keyword
+        outputs['final_params'] = {
+          **params,
+          'base_model': base_model,
+          'full_model': full_model,
+          'search_keyword': search_keyword
+        }
+    output:
+      base_model: "${outputs.base_model}"
+      full_model: "${outputs.full_model}"
+      search_keyword: "${outputs.search_keyword}"
+      final_params: "${outputs.final_params}"
+
+  # ========== 节点5: EAP3价格查询 ==========
+  - id: query_eap3
+    type: python_script
+    name: EAP3价格查询
+    description: 调用EAP3系统查询价格和货期
+    depends_on: [generate_model]
+    config:
+      script: "../tengen-selector/scripts/eap3_client.py"
+      args:
+        - "${generate_model.search_keyword}"
+    output:
+      query_results: "${stdout}"
+      exit_code: "${returncode}"
+    on_error:
+      action: fallback
+      message: "EAP3查询失败，仅返回型号信息"
+
+  # ========== 节点6: 格式化输出 ==========
+  - id: format_output
+    type: code
+    name: 格式化输出
+    description: 整理选型结果，生成完整报告
+    depends_on: [generate_model, query_eap3, recommend_breaking]
+    config:
+      language: python
+      code: |
+        params = inputs['generate_model']['final_params']
+        query_results = inputs.get('query_eap3', {}).get('query_results', '')
+        breaking_options = inputs.get('recommend_breaking', {}).get('breaking_options', {})
+        
+        frame = params['frame']
+        current = params['current']
+        poles = params['poles']
+        breaking = params['breaking']
+        accessory = params['accessory']
+        voltage = params['voltage']
+        special = params['special']
+        full_model = params['full_model']
+        
+        # 附件说明
+        accessory_map = {
+          '00': '无附件',
+          '08': '报警触头',
+          '10': '分励脱扣器',
+          '18': '分励脱扣器 + 报警触头',
+          '20': '辅助触头',
+          '28': '辅助触头 + 报警触头',
+          '30': '欠压脱扣器',
+          '38': '欠压脱扣器 + 报警触头',
+          '40': '分励脱扣器 + 辅助触头',
+          '48': '分励脱扣器 + 辅助触头 + 报警触头',
+          '50': '分励脱扣器 + 欠压脱扣器',
+          '60': '二组辅助触头',
+          '68': '二组辅助触头 + 报警触头',
+          '70': '辅助触头 + 欠压脱扣器',
+          '78': '欠压脱扣器 + 辅助触头 + 报警触头'
+        }
+        
+        # 构建输出
+        lines = [
+          "## TGM1N 塑壳断路器选型结果",
+          "",
+          f"**完整型号**: `{full_model}`",
+          "",
+          "### 技术参数",
+          f"- **壳架电流**: {frame}A",
+          f"- **额定电流**: {current}A",
+          f"- **极数**: {poles}P",
+          f"- **分断能力**: {breaking}型 ({breaking_options.get(breaking, '50kA')})",
+          f"- **附件**: {accessory_map.get(accessory, accessory)}",
+          f"- **控制电压**: {voltage}",
+        ]
+        
+        if special:
+          lines.append(f"- **特殊功能**: {', '.join(special)}")
+        
+        # 分断能力选项
+        if breaking_options:
+          lines.extend([
+            "",
+            "### 分断能力选项",
+          ])
+          for code, capacity in breaking_options.items():
+            marker = "✓" if code == breaking else "  "
+            lines.append(f"- {marker} **{code}型**: {capacity}")
+        
+        # 添加警告
+        warning = inputs.get('validate_current', {}).get('warning', '')
+        if warning:
+          lines.extend(["", f"⚠️ **注意**: {warning}"])
+        
+        # 添加查询结果
+        lines.append("")
+        if query_results:
+          lines.extend(["### EAP3查询结果", query_results])
+        else:
+          lines.extend([
+            "### EAP3查询",
+            "查询失败或未配置EAP3账号，仅提供型号信息。",
+            "",
+            "如需查询价格和货期，请配置EAP3登录信息。"
+          ])
+        
+        # 使用提示
+        lines.extend([
+          "",
+          "### 使用提示",
+          "- 含分励/欠压的型号必须标注电压（AC220V/AC380V/DC24V）",
+          "- 电动机保护需在附件代码后加'2'",
+          "- 4P默认为B型（N极参与合分），3N为A/D型（N极始终接通）",
+        ])
+        
+        outputs['formatted_output'] = "\\n".join(lines)
+    output:
+      formatted_output: "${outputs.formatted_output}"
+
+  # ========== 节点7: 发送结果 ==========
+  - id: send_result
+    type: notify
+    name: 发送选型结果
+    description: 将选型结果发送给用户
+    depends_on: [format_output]
+    config:
+      template: |
+        {{format_output.formatted_output}}
+
+# 错误处理
+on_error:
+  - type: notify
+    message: "❌ TGM1N选型流程出错: ${error.message}"
+  - type: log
+    level: error
+
+# 成功处理
+on_success:
+  - type: log
+    message: "✅ TGM1N选型完成: ${generate_model.full_model}"

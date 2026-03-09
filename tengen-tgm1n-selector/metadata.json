@@ -1,0 +1,46 @@
+{
+  "name": "tengen-tgm1n-selector",
+  "description": "天正电气TGM1N系列塑壳断路器智能选型与EAP3价格查询",
+  "version": "2.0",
+  "tags": ["#tgm1n", "#TGM1N", "#塑壳断路器", "#选型", "#天正"],
+  "trigger": {
+    "keywords": ["#tgm1n", "@tgm1n"],
+    "patterns": ["TGM1N.*选型", "TGM1N.*价格", "塑壳.*选型"]
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "用户查询内容，如'TGM1N 125/3P 63A 带分励'"
+      },
+      "frame": {
+        "type": "string",
+        "enum": ["63", "125", "160", "250", "320", "400", "630", "800", "1250", "1600"],
+        "description": "壳架电流"
+      },
+      "poles": {
+        "type": "string",
+        "enum": ["2", "3", "3N", "4"],
+        "description": "极数"
+      }
+    }
+  },
+  "workflow": {
+    "enabled": true,
+    "file": "workflow.yaml"
+  },
+  "cost": {
+    "memory": "低",
+    "time": "3-8秒",
+    "api_calls": 1
+  },
+  "requirements": {
+    "python_packages": ["requests"],
+    "network": ["eap3.tengen.com.cn"]
+  },
+  "supported_frames": ["63", "125", "160", "250", "320", "400", "630", "800", "1250", "1600"],
+  "author": "Kimi Claw",
+  "created": "2026-03-03",
+  "updated": "2026-03-10"
+}
