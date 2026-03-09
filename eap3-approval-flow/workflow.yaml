@@ -1,0 +1,248 @@
+name: EAP3 XZ38 审批流程
+version: "2.0"
+description: 检测待办、区域筛选、物料提取、人工确认、执行审批、飞书记录
+
+trigger:
+  - keyword: "#审核流程"
+  - keyword: "#审批"
+  - pattern: "审核.*XZ38"
+
+# 输入参数定义
+inputs:
+  action:
+    type: string
+    enum: [check, approve, approve_pending]
+    default: check
+    description: 操作类型
+
+# 工作流节点
+nodes:
+  # ========== 节点1: 登录EAP3 ==========
+  - id: login
+    type: api_call
+    name: EAP3登录
+    description: 调用EAP3 API获取SID
+    config:
+      url: "https://eap3.tengen.com.cn/r/w"
+      method: POST
+      headers:
+        Content-Type: application/x-www-form-urlencoded
+      body:
+        userid: "${secrets.EAP3_USER}"
+        pwd: "${secrets.EAP3_PASS}"
+        cmd: "com.actionsoft.apps.tengen.login"
+        deviceType: "pc"
+        lang: "cn"
+        pwdEncode: "RSA"
+        timeZone: "8"
+    output:
+      sid: "${response.data.sid}"
+    on_error:
+      action: fail
+      message: "EAP3登录失败，请检查账号密码"
+
+  # ========== 节点2: 检测待办 ==========
+  - id: check_todos
+    type: browser_action
+    name: 检测XZ38待办
+    description: 打开工作台，获取XZ38待办列表
+    depends_on: [login]
+    config:
+      url: "https://eap3.tengen.com.cn/r/w?sid=${login.sid}&cmd=com.actionsoft.apps.workbench_main_page"
+      actions:
+        - click: "text=待办任务"
+          wait: 8000
+        - execute_js: |
+            const data = window.firstPageData || [];
+            const todos = [];
+            data.forEach(item => {
+              if (Array.isArray(item)) todos.push(...item);
+              else if (typeof item === 'object') todos.push(item);
+            });
+            return todos.filter(t => t.title && t.title.includes('XZ38'));
+    output:
+      todo_list: "${js_result}"
+      todo_count: "${js_result.length}"
+
+  # ========== 节点3: 解析申请人 ==========
+  - id: parse_applicants
+    type: code
+    name: 解析申请人信息
+    description: 从待办标题提取申请人姓名和区域
+    depends_on: [check_todos]
+    config:
+      language: python
+      code: |
+        FUJIAN = ["茅智伟", "谢品", "林志伟", "吴国强", "黄丽萍", "何超阳", "唐悠梅"]
+        JIANGXI = ["肖培坤", "程明锦", "李志辉", "江伟康", "熊澄伟", "刘荣德", "胡洪箭", "朱海平", "陈毅"]
+        
+        todos = inputs['todo_list']
+        for todo in todos:
+          title = todo.get('title', '')
+          parts = title.split('-')
+          applicant = parts[2].strip() if len(parts) >= 3 else "未知"
+          
+          if applicant in FUJIAN:
+            region = "福建"
+          elif applicant in JIANGXI:
+            region = "江西"
+          else:
+            region = "其他"
+          
+          todo['applicant'] = applicant
+          todo['region'] = region
+        
+        outputs['todos'] = todos
+        outputs['regional'] = [t for t in todos if t['region'] in ['福建', '江西']]
+        outputs['others'] = [t for t in todos if t['region'] == '其他']
+    output:
+      todos: "${outputs.todos}"
+      regional_todos: "${outputs.regional}"
+      other_todos: "${outputs.others}"
+
+  # ========== 节点4: 区域判断（选择器） ==========
+  - id: region_selector
+    type: selector
+    name: 区域判断
+    description: 根据区域决定流程分支
+    depends_on: [parse_applicants]
+    condition: "${parse_applicants.regional_todos.length > 0}"
+    branches:
+      # 分支A: 有福建/江西待办（需要确认）
+      - case: true
+        nodes:
+          - id: extract_details
+            type: browser_action
+            name: 提取物料详情
+            description: 打开每个待办表单，提取定制系列、描述、生产公司
+            config:
+              loop: "${parse_applicants.regional_todos}"
+              actions:
+                - goto: "https://eap3.tengen.com.cn/r/w?sid=${login.sid}&cmd=CLIENT_BPM_FORM_MAIN_PAGE_OPEN&processInstId=${item.processInstId}&taskInstId=${item.id}&openState=1"
+                  wait: 8000
+                - execute_js: |
+                    // 提取物料表格数据
+                    const materials = [];
+                    document.querySelectorAll('table').forEach(table => {
+                      const headers = table.querySelectorAll('th, td');
+                      let hasSeries = false, hasDesc = false;
+                      headers.forEach(h => {
+                        if (h.textContent.includes('定制系列')) hasSeries = true;
+                        if (h.textContent.includes('定制描述')) hasDesc = true;
+                      });
+                      if (hasSeries && hasDesc) {
+                        table.querySelectorAll('tr').forEach((row, idx) => {
+                          if (idx === 0) return;
+                          const cells = row.querySelectorAll('td');
+                          if (cells.length >= 4) {
+                            materials.push({
+                              series: cells[0]?.textContent?.trim(),
+                              company: cells[1]?.textContent?.trim(),
+                              description: cells[3]?.textContent?.trim()
+                            });
+                          }
+                        });
+                      }
+                    });
+                    return {materials};
+          
+          - id: notify_user
+            type: notify
+            name: 通知用户确认
+            description: 发送待办详情到聊天框，等待用户确认
+            config:
+              template: |
+                📋 检测到福建/江西区域XZ38待办，请确认是否审批：
+                
+                {% for todo in parse_applicants.regional_todos %}
+                【{{loop.index}}】单据: {{todo.title}}
+                    申请人: {{todo.applicant}} ({{todo.region}})
+                    物料详情:
+                    {% for mat in todo.materials %}
+                    {{loop.index}}. 系列: {{mat.series}}
+                       描述: {{mat.description}}
+                       生产公司: {{mat.company}}
+                    {% endfor %}
+                {% endfor %}
+                
+                💡 如需审批，请回复：#审核
+                💡 如需跳过，请回复：#跳过
+            wait_for: "user_response"
+            timeout: 3600  # 1小时等待
+          
+          - id: user_decision
+            type: selector
+            name: 用户决策
+            condition: "${notify_user.response} == '#审核'"
+            branches:
+              - case: true
+                nodes:
+                  - id: approve_regional
+                    type: python_script
+                    name: 审批福建/江西待办
+                    script: eap3_auto_v2.py
+                    args: ["--approve-pending"]
+              
+              - case: false
+                nodes:
+                  - id: skip_regional
+                    type: log
+                    message: "用户选择跳过福建/江西待办"
+      
+      # 分支B: 无福建/江西待办
+      - case: false
+        nodes:
+          - id: check_others
+            type: selector
+            name: 检查其他省份待办
+            condition: "${parse_applicants.other_todos.length > 0}"
+            branches:
+              - case: true
+                nodes:
+                  - id: auto_approve
+                    type: python_script
+                    name: 自动审批其他省份
+                    description: 非福建/江西的待办直接自动审批
+                    script: eap3_auto_v2.py
+                    args: ["--auto-approve"]
+              
+              - case: false
+                nodes:
+                  - id: no_todos
+                    type: notify
+                    message: "当前没有 XZ38 待审批流程。"
+
+  # ========== 节点5: 记录到飞书（后置） ==========
+  - id: record_feishu
+    type: database_write
+    name: 记录审批结果
+    description: 将审批记录写入飞书多维表格
+    depends_on: [region_selector]
+    condition: "${workflow.success}"
+    config:
+      provider: feishu_bitable
+      app_token: "${secrets.FEISHU_APP_TOKEN}"
+      table_id: "${secrets.FEISHU_TABLE_ID}"
+      records: |
+        {% for todo in workflow.completed_todos %}
+        - 单据编号: {{todo.title}}
+          申请人: {{todo.applicant}}
+          省份: {{todo.region}}
+          状态: 已审批
+          审批时间: {{now()}}
+        {% endfor %}
+
+# 错误处理
+on_error:
+  - type: notify
+    message: "❌ 审批流程执行失败: ${error.message}"
+  - type: log
+    level: error
+    message: "${error.stack}"
+
+# 成功处理
+on_success:
+  - type: notify
+    message: "✅ 审批流程执行完成"
+  - type: cleanup
+    action: clear_pending

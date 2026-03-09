@@ -1,0 +1,41 @@
+{
+  "name": "eap3-approval",
+  "description": "EAP3 XZ38定制及新产品需求审批自动化",
+  "version": "2.0",
+  "tags": ["#审核流程", "#审批", "#EAP3"],
+  "trigger": {
+    "keywords": ["#审核流程", "#审批"],
+    "patterns": ["审核.*XZ38", "审批.*定制"]
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["check", "approve", "approve_pending"],
+        "description": "操作类型：检测/审批/审批待确认列表"
+      },
+      "immediate": {
+        "type": "boolean",
+        "description": "是否立即执行（绕过确认）"
+      }
+    }
+  },
+  "workflow": {
+    "enabled": true,
+    "file": "workflow.yaml"
+  },
+  "cost": {
+    "memory": "中（启动浏览器）",
+    "time": "30-60秒",
+    "api_calls": 5
+  },
+  "requirements": {
+    "python_packages": ["playwright", "requests"],
+    "system_deps": ["chromium"],
+    "network": ["eap3.tengen.com.cn"]
+  },
+  "author": "Kimi Claw",
+  "created": "2026-03-09",
+  "updated": "2026-03-10"
+}
