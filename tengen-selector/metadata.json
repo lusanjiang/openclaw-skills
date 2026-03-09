@@ -1,0 +1,44 @@
+{
+  "name": "tengen-selector",
+  "description": "天正电气TGW1N/TGWD/TGM1N系列断路器智能选型与EAP3价格查询",
+  "version": "2.0",
+  "tags": ["#tengen", "#tgw", "#选型", "#断路器", "#天正"],
+  "trigger": {
+    "keywords": ["#tengen", "#tgw", "#TGW1N", "#TGWD", "#TGM1N"],
+    "patterns": ["TGW.*选型", "TGM.*价格", "断路器.*查询"]
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "用户查询内容，如'TGW1N 2000A 3P 抽屉'"
+      },
+      "series": {
+        "type": "string",
+        "enum": ["TGW1N", "TGWD", "TGM1N", "auto"],
+        "default": "auto",
+        "description": "产品系列，auto自动识别"
+      }
+    }
+  },
+  "workflow": {
+    "enabled": true,
+    "file": "workflow.yaml"
+  },
+  "cost": {
+    "memory": "低",
+    "time": "5-10秒",
+    "api_calls": 1
+  },
+  "requirements": {
+    "python_packages": ["requests"],
+    "system_deps": [],
+    "network": ["eap3.tengen.com.cn"]
+  },
+  "supported_series": ["TGW1N", "TGWD", "TGM1N"],
+  "frame_sizes": ["63", "125", "160", "250", "320", "400", "630", "800", "1250", "1600", "2000", "3200", "4000"],
+  "author": "Kimi Claw",
+  "created": "2026-03-02",
+  "updated": "2026-03-10"
+}

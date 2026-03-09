@@ -1,0 +1,327 @@
+name: 天正断路器智能选型
+version: "2.0"
+description: TGW1N/TGWD/TGM1N系列选型计算与EAP3价格查询
+
+trigger:
+  - keyword: "#tengen"
+  - keyword: "#tgw"
+  - pattern: "TGW.*选型"
+  - pattern: "TGM.*价格"
+  - pattern: "断路器.*查询"
+
+# 输入参数
+inputs:
+  query:
+    type: string
+    description: 用户查询内容
+    example: "TGW1N 2000A 3P 抽屉"
+  series:
+    type: string
+    enum: [TGW1N, TGWD, TGM1N, auto]
+    default: auto
+
+# 工作流节点
+nodes:
+  # ========== 节点1: 解析用户输入 ==========
+  - id: parse_input
+    type: code
+    name: 解析选型参数
+    description: 从用户输入提取电流、极数、安装方式等参数
+    config:
+      language: python
+      code: |
+        import re
+        
+        query = inputs.get('query', '')
+        
+        # 提取系列
+        series_match = re.search(r'(TGW1N|TGWD|TGM1N|TGW1|TGWD|TGM1|TGM)', query.upper())
+        series = series_match.group(1) if series_match else 'TGW1N'
+        
+        # 标准化系列名称
+        if series in ['TGW1', 'TGW1N']:
+          series = 'TGW1N'
+        elif series in ['TGWD']:
+          series = 'TGWD'
+        elif series in ['TGM1', 'TGM1N', 'TGM']:
+          series = 'TGM1N'
+        
+        # 提取电流
+        current_match = re.search(r'(\d+)\s*[Aa]', query)
+        current = int(current_match.group(1)) if current_match else 0
+        
+        # 提取极数
+        poles_match = re.search(r'(\d)[Pp]', query)
+        poles = poles_match.group(1) if poles_match else '3'
+        
+        # 判断安装方式
+        mounting = '抽屉式' if any(kw in query for kw in ['抽屉', 'drawout']) else '固定式'
+        
+        # 判断控制器类型（TGW1N祥云3.0 vs TGWD 2H/3H/3M）
+        if series == 'TGW1N':
+          controller = '祥云3.0'
+        elif series == 'TGWD':
+          # 默认3M，除非用户指定
+          controller = '3M型'
+          if '2H' in query.upper():
+            controller = '2H型'
+          elif '3H' in query.upper():
+            controller = '3H型'
+        else:
+          controller = '标准'
+        
+        outputs['parsed'] = {
+          'series': series,
+          'current': current,
+          'poles': poles,
+          'mounting': mounting,
+          'controller': controller,
+          'original_query': query
+        }
+    output:
+      parsed: "${outputs.parsed}"
+
+  # ========== 节点2: 匹配壳架 ==========
+  - id: match_frame
+    type: code
+    name: 匹配壳架等级
+    description: 根据电流选择壳架大小
+    depends_on: [parse_input]
+    config:
+      language: python
+      code: |
+        parsed = inputs['parse_input']['parsed']
+        current = parsed['current']
+        series = parsed['series']
+        
+        # 壳架等级定义
+        frame_sizes = [63, 125, 160, 250, 320, 400, 630, 800, 1250, 1600, 2000, 3200, 4000]
+        
+        # 选择合适的壳架（向上取整）
+        frame = None
+        for size in frame_sizes:
+          if current <= size:
+            frame = size
+            break
+        
+        # TGM1N系列最大1600A，TGW1N/TGWD最大4000A
+        if series == 'TGM1N' and frame and frame > 1600:
+          frame = 1600
+          outputs['warning'] = 'TGM1N系列最大壳架为1600A'
+        
+        # TGW1N/TGWD从2000A开始
+        if series in ['TGW1N', 'TGWD'] and frame and frame < 2000:
+          # 如果电流小，提示可能是TGM1N系列
+          outputs['suggestion'] = '小电流建议使用TGM1N系列，TGW1N/TGWD最小壳架为2000A'
+        
+        outputs['frame'] = frame or 2000
+        outputs['matched_params'] = {
+          **parsed,
+          'frame': frame or 2000
+        }
+    output:
+      frame: "${outputs.frame}"
+      matched_params: "${outputs.matched_params}"
+      warning: "${outputs.warning}"
+      suggestion: "${outputs.suggestion}"
+
+  # ========== 节点3: 确定分断能力 ==========
+  - id: determine_breaking
+    type: code
+    name: 确定分断能力
+    description: 根据系列和壳架确定分断能力代码
+    depends_on: [match_frame]
+    config:
+      language: python
+      code: |
+        params = inputs['match_frame']['matched_params']
+        series = params['series']
+        frame = params['frame']
+        
+        # 分断能力规则
+        if series == 'TGM1N':
+          # TGM1N: L(25kA), M(35-50kA), H(50-70kA), R(70-85kA)
+          if frame <= 160:
+            breaking = 'M'  # 默认M型
+          elif frame <= 400:
+            breaking = 'M'
+          else:
+            breaking = 'M'
+        elif series in ['TGW1N', 'TGWD']:
+          # TGW1N/TGWD: M(标准), H(高分断)
+          if frame >= 2000:
+            breaking = 'M'  # 默认M型，可选H高分断
+          else:
+            breaking = 'M'
+        else:
+          breaking = 'M'
+        
+        outputs['breaking'] = breaking
+        outputs['params_with_breaking'] = {
+          **params,
+          'breaking': breaking
+        }
+    output:
+      breaking: "${outputs.breaking}"
+      params_with_breaking: "${outputs.params_with_breaking}"
+
+  # ========== 节点4: 生成基础型号 ==========
+  - id: generate_model
+    type: code
+    name: 生成型号
+    description: 根据参数生成完整型号
+    depends_on: [determine_breaking]
+    config:
+      language: python
+      code: |
+        params = inputs['determine_breaking']['params_with_breaking']
+        series = params['series']
+        frame = params['frame']
+        breaking = params['breaking']
+        poles = params['poles']
+        current = params['current']
+        controller = params['controller']
+        mounting = params['mounting']
+        
+        # 生成基础型号
+        if series == 'TGM1N':
+          # TGM1N-160M/3370
+          # 脱扣器代码3370（热磁式）
+          base_model = f"{series}-{frame}{breaking}/{poles}370"
+        elif series == 'TGW1N':
+          # TGW1N-2000/3P
+          base_model = f"{series}-{frame}/{poles}P"
+        elif series == 'TGWD':
+          # TGWD-2000/3P
+          base_model = f"{series}-{frame}/{poles}P"
+        else:
+          base_model = f"{series}-{frame}/{poles}P"
+        
+        # 生成搜索关键词
+        search_keyword = f"{base_model} {current}A {mounting}"
+        
+        outputs['base_model'] = base_model
+        outputs['search_keyword'] = search_keyword
+        outputs['complete_params'] = {
+          **params,
+          'base_model': base_model,
+          'search_keyword': search_keyword
+        }
+    output:
+      base_model: "${outputs.base_model}"
+      search_keyword: "${outputs.search_keyword}"
+      complete_params: "${outputs.complete_params}"
+
+  # ========== 节点5: EAP3价格查询 ==========
+  - id: query_eap3
+    type: python_script
+    name: EAP3价格查询
+    description: 调用EAP3系统查询价格和货期
+    depends_on: [generate_model]
+    config:
+      script: "scripts/eap3_client.py"
+      args:
+        - "${generate_model.search_keyword}"
+    output:
+      query_results: "${stdout}"
+      exit_code: "${returncode}"
+    on_error:
+      action: fallback
+      message: "EAP3查询失败，仅返回型号信息"
+
+  # ========== 节点6: 格式化输出 ==========
+  - id: format_output
+    type: code
+    name: 格式化输出
+    description: 整理选型结果，生成可读报告
+    depends_on: [generate_model, query_eap3]
+    config:
+      language: python
+      code: |
+        params = inputs['generate_model']['complete_params']
+        query_results = inputs.get('query_eap3', {}).get('query_results', '')
+        
+        series = params['series']
+        frame = params['frame']
+        current = params['current']
+        poles = params['poles']
+        controller = params['controller']
+        mounting = params['mounting']
+        base_model = params['base_model']
+        
+        # 生成完整型号
+        if series == 'TGM1N':
+          full_model = f"{base_model} {current}A AC220V({controller})"
+        else:
+          full_model = f"{base_model} {current}A AC220V({controller})"
+        
+        # 构建输出
+        output_lines = [
+          "## 天正断路器选型结果",
+          "",
+          f"**系列**: {series}",
+          f"**壳架**: {frame}A",
+          f"**额定电流**: {current}A",
+          f"**极数**: {poles}P",
+          f"**安装方式**: {mounting}",
+          f"**控制器**: {controller}",
+          "",
+          f"### 推荐型号",
+          f"```",
+          f"{full_model}",
+          f"```",
+          "",
+        ]
+        
+        # 添加警告或建议
+        warning = inputs.get('match_frame', {}).get('warning', '')
+        suggestion = inputs.get('match_frame', {}).get('suggestion', '')
+        if warning:
+          output_lines.extend([f"⚠️ **注意**: {warning}", ""])
+        if suggestion:
+          output_lines.extend([f"💡 **建议**: {suggestion}", ""])
+        
+        # 添加查询结果
+        if query_results:
+          output_lines.extend([
+            "### EAP3查询结果",
+            query_results,
+          ])
+        else:
+          output_lines.extend([
+            "### EAP3查询",
+            "查询失败或未配置EAP3账号，仅提供型号信息。",
+            "",
+            "如需查询价格，请配置EAP3登录信息。",
+          ])
+        
+        outputs['formatted_output'] = "\\n".join(output_lines)
+        outputs['full_model'] = full_model
+    output:
+      formatted_output: "${outputs.formatted_output}"
+      full_model: "${outputs.full_model}"
+
+  # ========== 节点7: 发送结果 ==========
+  - id: send_result
+    type: notify
+    name: 发送选型结果
+    description: 将选型结果发送给用户
+    depends_on: [format_output]
+    config:
+      template: |
+        {{format_output.formatted_output}}
+        
+        ---
+        💡 如需其他配置（欠压、辅助触点等），请告知具体要求。
+
+# 错误处理
+on_error:
+  - type: notify
+    message: "❌ 选型流程出错: ${error.message}"
+  - type: log
+    level: error
+
+# 成功处理
+on_success:
+  - type: log
+    message: "✅ 断路器选型完成: ${generate_model.base_model}"
