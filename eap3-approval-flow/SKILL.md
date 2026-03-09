@@ -1,22 +1,33 @@
-# EAP3 XZ38审批自动化技能
+# EAP3 XZ38审批自动化技能 v2.0
 
 ## 功能
 自动完成EAP3系统中XZ38-定制及新产品需求审批流程。
 
+**v2.0 更新**：
+- ✅ 区域筛选：只处理福建/江西相关人员的XZ38流程
+- ✅ 物料提取：自动提取定制系列、定制描述、生产公司
+- ✅ 确认模式：福建/江西待办发送通知等待确认，其他省份自动审批
+- ✅ 飞书记录：审批记录自动同步到飞书多维表格
+
 ## 审批流程
-1. 登录EAP3获取SID
-2. 访问工作台获取待办列表
-3. 点击待办进入详情页
-4. 点击"接收办理"
-5. 确认对话框（确定）
-6. 选择审批结论"已核实请后台支持"
-7. 点击"办理"提交
-8. 确认提交完成
+### 福建/江西人员（需确认）
+```
+检测待办 → 提取物料详情 → 发送通知到聊天 → 等待用户确认 → 执行审批 → 记录到表格
+```
+
+### 其他省份（自动）
+```
+检测待办 → 自动审批 → 记录到表格
+```
+
+## 福建/江西人员名单
+- **福建**：茅智伟、谢品、林志伟、吴国强、黄丽萍、何超阳、唐悠梅
+- **江西**：肖培坤、程明锦、李志辉、江伟康、熊澄伟、刘荣德、胡洪箭、朱海平、陈毅
 
 ## 使用方法
 
 ### 方式1: 定时任务（自动 - 每20分钟）
-已配置定时任务，每20分钟自动检查并审批XZ38待办：
+已配置定时任务，每20分钟自动检测XZ38待办：
 ```bash
 # 查看定时任务
 crontab -l
@@ -24,20 +35,33 @@ crontab -l
 # 查看日志
 tail -f /root/.openclaw/logs/eap3_cron.log
 
-# 手动执行一次
-/root/.openclaw/skills/eap3-approval-flow/cron_runner.sh
+# 手动执行检测
+/root/.openclaw/skills/eap3-approval-flow/cron_runner_v2.sh
 ```
 
-### 方式2: #审批 标签（手动）
-在对话中输入 `#审批` 自动触发：
+### 方式2: #审核流程 标签（手动检测）
+在对话中输入 `#审核流程` 立即检测：
 ```
-#审批
+#审核流程
+```
+- 其他省份：自动审批
+- 福建/江西：发送通知等待确认
+
+### 方式3: #审核 标签（审批待确认）
+当系统检测到福建/江西待办并发送通知后，回复 `#审核` 执行审批：
+```
+#审核
 ```
 
-### 方式3: 一键运行
+### 方式4: 手动运行脚本
 ```bash
 cd /root/.openclaw/skills/eap3-approval-flow
-python3 eap3_auto.py
+
+# 检测待办（福建/江西会发送通知）
+python3 eap3_auto_v2.py
+
+# 审批待确认列表
+python3 eap3_auto_v2.py --approve-pending
 ```
 
 ## 定时任务配置（工作时间9:00-19:00）
@@ -45,7 +69,7 @@ python3 eap3_auto.py
 ### 执行时间
 - **周期**: 每20分钟执行一次
 - **时段**: 每天 9:00-19:00（晚上和早上不执行）
-- **任务**: `*/20 9-18 * * * /root/.openclaw/skills/eap3-approval-flow/cron_runner.sh`
+- **任务**: `*/20 9-18 * * * /root/.openclaw/skills/eap3-approval-flow/cron_runner_v2.sh`
 
 ### 执行计划示例
 ```
@@ -328,12 +352,20 @@ except:
 - **状态保存**: 每步截图记录
 
 ## 文件位置
-- 主脚本: `/root/.openclaw/skills/eap3-approval-flow/eap3_auto.py`
-- 检查脚本: `/root/.openclaw/skills/eap3-approval-flow/check_todos.py`
-- 日志截图: `/root/.openclaw/logs/eap3_*.png`
+- 主脚本 v2.0: `/root/.openclaw/skills/eap3-approval-flow/eap3_auto_v2.py`
+- 定时任务: `/root/.openclaw/skills/eap3-approval-flow/cron_runner_v2.sh`
+- 旧版脚本: `/root/.openclaw/skills/eap3-approval-flow/eap3_auto.py`
+- 日志: `/root/.openclaw/logs/eap3_cron.log`
 
 ## 更新记录
-- 2026-03-06: 完成完整审批流程开发和测试
-  - 成功处理5条初始待办
-  - 成功处理2条新增待办
-  - 实现完整的自我审核机制
+- 2026-03-09: v2.0 发布
+  - 区域筛选（福建/江西需要确认，其他自动）
+  - 物料详情提取（定制系列、定制描述、生产公司）
+  - 确认模式（检测→通知→等待确认→审批）
+  - 飞书多维表格集成（自动记录审批详情）
+  - 历史数据导入（5条已审批记录）
+
+- 2026-03-06: v1.0 完成
+  - 完整审批流程
+  - 自我审核机制
+  - 定时任务配置

@@ -162,11 +162,94 @@ class EAP3AutoApproverV2:
             
         return first_page_data
         
+    async def extract_form_details(self, todo):
+        """打开表单并提取详细信息"""
+        task_id = todo.get('id')
+        process_inst_id = todo.get('processInstId')
+        
+        try:
+            # 打开详情页
+            open_url = f"{EAP3_URL}/r/w?sid={self.sid}&cmd=CLIENT_BPM_FORM_MAIN_PAGE_OPEN&processInstId={process_inst_id}&taskInstId={task_id}&openState=1"
+            await self.page.goto(open_url, timeout=60000)
+            await self.page.wait_for_timeout(8000)
+            
+            # 提取表单数据
+            form_data = await self.page.evaluate('''() => {
+                const data = {};
+                
+                // 提取单据编号
+                const formNoEl = document.querySelector('[name="formNo"]') || 
+                                  document.querySelector('input[value*="XZ38"]') ||
+                                  document.querySelector('td:contains("XZ38")');
+                if (formNoEl) data.formNo = formNoEl.value || formNoEl.textContent;
+                
+                // 提取客户名称
+                const customerLabels = document.querySelectorAll('td, label, div');
+                for (let el of customerLabels) {
+                    if (el.textContent.includes('客户名称') || el.textContent.includes('客户')) {
+                        const nextEl = el.nextElementSibling || el.parentElement.nextElementSibling;
+                        if (nextEl) {
+                            data.customer = nextEl.textContent.trim();
+                            break;
+                        }
+                    }
+                }
+                
+                // 提取物料表格数据
+                const materials = [];
+                const tables = document.querySelectorAll('table');
+                for (let table of tables) {
+                    const headers = table.querySelectorAll('th, td');
+                    let hasCustomSeries = false;
+                    let hasCustomDesc = false;
+                    
+                    for (let h of headers) {
+                        if (h.textContent.includes('定制系列')) hasCustomSeries = true;
+                        if (h.textContent.includes('定制描述')) hasCustomDesc = true;
+                    }
+                    
+                    if (hasCustomSeries && hasCustomDesc) {
+                        const rows = table.querySelectorAll('tr');
+                        for (let i = 1; i < rows.length; i++) {
+                            const cells = rows[i].querySelectorAll('td');
+                            if (cells.length >= 4) {
+                                materials.push({
+                                    series: cells[0]?.textContent?.trim() || '',
+                                    company: cells[1]?.textContent?.trim() || '',
+                                    env: cells[2]?.textContent?.trim() || '',
+                                    description: cells[3]?.textContent?.trim() || ''
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                data.materials = materials;
+                return data;
+            }''')
+            
+            return form_data
+            
+        except Exception as e:
+            self.log(f"提取表单详情失败: {e}", "WARN")
+            return {}
+        
     def save_pending_approval(self, todos):
         """保存待确认的审批列表到文件"""
+        # 序列化时处理可能的非JSON兼容类型
+        serializable_todos = []
+        for todo in todos:
+            todo_copy = {}
+            for k, v in todo.items():
+                if isinstance(v, (str, int, float, bool, list, dict, type(None))):
+                    todo_copy[k] = v
+                else:
+                    todo_copy[k] = str(v)
+            serializable_todos.append(todo_copy)
+        
         pending_data = {
             "timestamp": datetime.now().isoformat(),
-            "todos": todos,
+            "todos": serializable_todos,
             "count": len(todos)
         }
         with open(PENDING_FILE, 'w', encoding='utf-8') as f:
@@ -413,22 +496,40 @@ class EAP3AutoApproverV2:
                 
             # 6. 处理福建/江西（发送通知等待确认）
             if regional_todos:
-                self.log(f"\n[区域待办] 福建/江西共 {len(regional_todos)} 条，发送通知...")
+                self.log(f"\n[区域待办] 福建/江西共 {len(regional_todos)} 条，提取详情并发送通知...")
+                
+                # 提取每个待办的详细信息
+                for todo in regional_todos:
+                    details = await self.extract_form_details(todo)
+                    todo['form_details'] = details
+                    await self.page.wait_for_timeout(2000)  # 等待页面稳定
                 
                 # 输出通知信息（会被OpenClaw捕获发送到聊天）
-                print("\n" + "=" * 50)
+                print("\n" + "=" * 60)
                 print("📋 检测到福建/江西区域XZ38待办，请确认是否审批：")
-                print("=" * 50)
+                print("=" * 60)
                 
                 for i, todo in enumerate(regional_todos, 1):
-                    print(f"\n【{i}】单据: {todo.get('title', '未知')}")
-                    print(f"    申请人: {todo['applicant']} ({todo['region']})")
-                    print(f"    任务ID: {todo.get('id', 'N/A')}")
+                    details = todo.get('form_details', {})
+                    materials = details.get('materials', [])
                     
-                print("\n" + "=" * 50)
+                    print(f"\n【{i}】单据编号: {todo.get('title', '未知')}")
+                    print(f"    申请人: {todo['applicant']} ({todo['region']})")
+                    print(f"    客户名称: {details.get('customer', '未提取到')}")
+                    
+                    if materials:
+                        print(f"    物料详情:")
+                        for j, mat in enumerate(materials, 1):
+                            print(f"      {j}. 系列: {mat.get('series', 'N/A')}")
+                            print(f"         描述: {mat.get('description', 'N/A')}")
+                            print(f"         生产公司: {mat.get('company', 'N/A')}")
+                    else:
+                        print(f"    物料详情: 未能提取，需人工查看")
+                        
+                print("\n" + "=" * 60)
                 print("💡 如需审批，请回复：#审核")
                 print("💡 如需跳过，请回复：#跳过")
-                print("=" * 50 + "\n")
+                print("=" * 60 + "\n")
                 
                 # 保存待确认列表
                 self.save_pending_approval(regional_todos)
