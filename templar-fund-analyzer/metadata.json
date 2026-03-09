@@ -1,0 +1,52 @@
+{
+  "name": "templar-fund-analyzer",
+  "description": "宏利复兴伟业灵活配置混合C (017612) 智能交易助手 - 基于T+1规则、基金经理画像、AI产业链的综合分析系统",
+  "version": "3.0",
+  "tags": ["#基金", "#交易", "#宏利复兴", "#投资"],
+  "trigger": {
+    "cron": "30 14 * * 1-5",
+    "keywords": ["#基金", "#交易建议"],
+    "emergency": ["单日波动±3%", "止盈止损触发"]
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["daily", "emergency", "sync"],
+        "default": "daily",
+        "description": "运行模式：daily日常/emergency紧急/sync同步飞书"
+      },
+      "force": {
+        "type": "boolean",
+        "default": false,
+        "description": "强制重新获取数据"
+      }
+    }
+  },
+  "workflow": {
+    "enabled": true,
+    "file": "workflow.yaml"
+  },
+  "cost": {
+    "memory": "低",
+    "time": "10-20秒",
+    "api_calls": 3
+  },
+  "requirements": {
+    "python_packages": ["requests", "pandas"],
+    "data_sources": [
+      "天天基金网(净值)",
+      "新浪财经(沪深300)",
+      "飞书多维表格(记录)"
+    ]
+  },
+  "data_retention": {
+    "daily_advice": "30天",
+    "alert_log": "90天",
+    "feishu_sync": "永久"
+  },
+  "author": "Kimi Claw",
+  "created": "2026-03-08",
+  "updated": "2026-03-10"
+}

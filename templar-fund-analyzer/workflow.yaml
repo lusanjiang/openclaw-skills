@@ -1,0 +1,290 @@
+name: 宏利复兴基金交易分析
+version: "3.0"
+description: 基于T+1规则、基金经理画像、AI产业链的综合交易分析系统
+
+trigger:
+  - cron: "30 14 * * 1-5"    # 工作日14:30
+  - keyword: "#基金"
+  - keyword: "#交易建议"
+  - emergency: "单日波动±3%"
+  - emergency: "止盈止损触发"
+
+# 输入参数
+inputs:
+  mode:
+    type: string
+    enum: [daily, emergency, sync]
+    default: daily
+    description: 运行模式
+  force:
+    type: boolean
+    default: false
+    description: 强制重新获取数据
+
+# 工作流节点
+nodes:
+  # ========== 节点1: 获取基金数据 ==========
+  - id: fetch_fund_data
+    type: api_call
+    name: 获取基金净值
+    description: 从天天基金网获取017612实时净值和估算
+    config:
+      url: "http://fundgz.1234567.com.cn/js/017612.js"
+      method: GET
+      headers:
+        User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        Referer: "http://fundf10.eastmoney.com/"
+    output:
+      fund_code: "${response.code}"
+      fund_name: "${response.name}"
+      net_value: "${response.nav}"           # 单位净值
+      acc_value: "${response.acnav}"        # 累计净值
+      estimate: "${response.gsz}"           # 估算净值
+      estimate_time: "${response.gztime}"   # 估算时间
+      growth_rate: "${response.gszzl}"      # 估算涨跌幅
+    on_error:
+      action: fallback
+      use_cache: true
+      message: "基金数据获取失败，使用缓存数据"
+
+  # ========== 节点2: 获取沪深300 ==========
+  - id: fetch_market_data
+    type: api_call
+    name: 获取市场数据
+    description: 获取沪深300指数涨跌
+    depends_on: [fetch_fund_data]
+    config:
+      url: "https://push2.eastmoney.com/api/qt/stock/get"
+      method: GET
+      params:
+        secid: "1.000300"
+        fields: "f43,f44,f45,f46,f47,f48,f60,f170"
+    output:
+      hs300_price: "${response.data.f43}"
+      hs300_change: "${response.data.f170}"  # 涨跌幅
+      hs300_name: "沪深300"
+    on_error:
+      action: fallback
+      use_cache: true
+
+  # ========== 节点3: 计算收益率 ==========
+  - id: calculate_returns
+    type: code
+    name: 计算收益率
+    description: 基于持仓计算当前收益
+    depends_on: [fetch_fund_data]
+    config:
+      language: python
+      code: |
+        import json
+        from pathlib import Path
+        
+        # 读取持仓配置
+        config_path = Path("/root/.openclaw/workspace/fund_config.json")
+        if config_path.exists():
+          with open(config_path) as f:
+            config = json.load(f)
+        else:
+          config = {"amount": 9167, "days": 249, "cost": 1.0}
+        
+        # 获取输入数据
+        fund_data = inputs['fetch_fund_data']
+        estimate = float(fund_data.get('estimate', 0))
+        
+        # 计算收益
+        amount = config['amount']
+        cost = config.get('cost', 1.0)
+        current_value = amount * estimate / cost
+        profit = current_value - amount
+        profit_pct = (profit / amount) * 100
+        
+        outputs['position'] = {
+          'amount': amount,
+          'days': config['days'],
+          'current_value': round(current_value, 2),
+          'profit': round(profit, 2),
+          'profit_pct': round(profit_pct, 2)
+        }
+        outputs['config'] = config
+    output:
+      position: "${outputs.position}"
+      fund_config: "${outputs.config}"
+
+  # ========== 节点4: 加载AI产业链数据 ==========
+  - id: load_ai_industry
+    type: file_read
+    name: 加载产业链数据
+    description: 读取AI产业链监控数据
+    depends_on: []
+    config:
+      path: "/root/.openclaw/workspace/AI_INDUSTRY_MONITOR.md"
+    output:
+      ai_industry_content: "${content}"
+
+  # ========== 节点5: 生成交易建议 ==========
+  - id: generate_advice
+    type: llm_reasoning
+    name: 生成交易建议
+    description: 基于T+1规则、周五效应、止盈止损生成建议
+    depends_on: [fetch_fund_data, fetch_market_data, calculate_returns, load_ai_industry]
+    config:
+      model: "kimi-coding/k2p5"
+      temperature: 0.3
+      system_prompt: |
+        你是专业的基金交易顾问，基于T+1规则、基金经理画像、AI产业链分析给出交易建议。
+        
+        核心规则：
+        1. T+1规则：15:00前买入=当日净值，15:00后=次日净值
+        2. 周五效应：周五开盘减仓至50%，周末避险
+        3. 止盈策略：30%→20%→10%三二一法则
+        4. 止损策略：-15%绝对止损，盈利后回撤5%止盈
+        5. 加仓信号：大盘跌≥2%可考虑分批加仓
+        
+        基金经理孙硕画像：
+        - 北京大学计算机硕士，专注AI算力产业链
+        - 持仓高度集中，前十大重仓75%
+        - 换手率358%，季度调仓
+        - 重仓股：中际旭创、新易盛、天孚通信、源杰科技
+        
+        输出格式：
+        - 市场环境评估
+        - 持仓收益分析
+        - 具体操作建议（加仓/减仓/观望）
+        - 操作理由
+        - 风险提示
+      user_prompt: |
+        当前数据：
+        - 基金：{{fetch_fund_data.fund_name}} ({{fetch_fund_data.fund_code}})
+        - 估算净值：{{fetch_fund_data.estimate}} ({{fetch_fund_data.growth_rate}}%)
+        - 沪深300：{{fetch_market_data.hs300_change}}%
+        - 持仓：{{calculate_returns.position.amount}}元，{{calculate_returns.position.days}}天
+        - 当前收益：{{calculate_returns.position.profit_pct}}%
+        - 今日星期：{{today_weekday}}
+        
+        请给出今日交易建议。
+    output:
+      advice_text: "${response.content}"
+      recommendation: "${response.recommendation}"  # 加仓/减仓/观望
+
+  # ========== 节点6: 检测紧急预警 ==========
+  - id: check_alerts
+    type: selector
+    name: 紧急预警检测
+    description: 检测是否触发紧急预警条件
+    depends_on: [fetch_fund_data, calculate_returns]
+    condition: |
+      ${fetch_fund_data.growth_rate} > 3 or 
+      ${fetch_fund_data.growth_rate} < -3 or
+      ${calculate_returns.position.profit_pct} >= 30 or
+      ${calculate_returns.position.profit_pct} <= -15
+    branches:
+      - case: true
+        nodes:
+          - id: send_emergency_alert
+            type: notify
+            name: 发送紧急预警
+            config:
+              priority: high
+              template: |
+                🚨 紧急预警触发！
+                
+                基金：{{fetch_fund_data.fund_name}}
+                当前估算：{{fetch_fund_data.estimate}} ({{fetch_fund_data.growth_rate}}%)
+                持仓收益：{{calculate_returns.position.profit_pct}}%
+                
+                建议立即关注并考虑操作！
+      - case: false
+        nodes:
+          - id: normal_flow
+            type: log
+            message: "未触发紧急预警，继续日常流程"
+
+  # ========== 节点7: 保存日常建议 ==========
+  - id: save_daily_advice
+    type: file_write
+    name: 保存建议
+    description: 保存当日建议到本地文件
+    depends_on: [generate_advice]
+    config:
+      path: "/root/.openclaw/workspace/daily_advice.txt"
+      append: true
+      content: |
+        === {{today}} {{weekday}} ===
+        {{generate_advice.advice_text}}
+        
+    output:
+      saved: true
+
+  # ========== 节点8: 同步到飞书多维表格 ==========
+  - id: sync_to_feishu
+    type: database_write
+    name: 飞书同步
+    description: 同步交易记录到飞书多维表格
+    depends_on: [fetch_fund_data, calculate_returns, generate_advice]
+    condition: "${inputs.mode} != 'emergency'"  # 紧急模式不同步
+    config:
+      provider: feishu_bitable
+      app_token: "${secrets.FEISHU_APP_TOKEN}"
+      table_id: "${secrets.FEISHU_TABLE_TRADE}"
+      record:
+        日期: "{{today}}"
+        星期: "{{weekday}}"
+        操作: "{{generate_advice.recommendation}}"
+        金额: "{{calculate_returns.position.amount}}"
+        净值: "{{fetch_fund_data.estimate}}"
+        涨跌幅: "{{fetch_fund_data.growth_rate}}%"
+        收益率: "{{calculate_returns.position.profit_pct}}%"
+        AI建议: "{{generate_advice.advice_text}}"
+        数据类型: "交易记录"
+    output:
+      synced: true
+      record_id: "${response.record_id}"
+
+  # ========== 节点9: 发送用户通知 ==========
+  - id: notify_user
+    type: notify
+    name: 发送交易建议
+    description: 发送格式化建议给用户
+    depends_on: [generate_advice, sync_to_feishu]
+    config:
+      channel: feishu
+      template: |
+        📊 宏利复兴伟业灵活配置混合C (017612)
+        ⏰ {{today}} {{weekday}} {{time}}
+        
+        📈 市场环境：
+           • 沪深300: {{fetch_market_data.hs300_change}}%
+           • 基金估算: {{fetch_fund_data.growth_rate}}%
+        
+        💰 持仓情况：
+           • 当前收益: {{calculate_returns.position.profit_pct}}%
+           • 持仓金额: ¥{{calculate_returns.position.amount}}
+        
+        🎯 今日建议: {{generate_advice.recommendation}}
+        
+        {{generate_advice.advice_text}}
+        
+        📌 策略提醒：
+           • 止盈: 30%→20%→10%
+           • 止损: -15%绝对止损
+           • 周五: 开盘减仓至50%
+
+# 错误处理
+on_error:
+  - type: notify
+    message: "❌ 基金分析流程失败: ${error.message}"
+  - type: log
+    level: error
+    message: "${error.stack}"
+  - type: fallback
+    action: use_last_advice
+    message: "使用上一次成功生成的建议"
+
+# 成功处理
+on_success:
+  - type: log
+    message: "✅ 基金交易分析完成，建议已生成并同步"
+  - type: metrics
+    record:
+      execution_time: "${duration}"
+      data_freshness: "${fetch_fund_data.estimate_time}"

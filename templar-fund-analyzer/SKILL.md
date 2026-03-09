@@ -3,9 +3,39 @@ name: templar-fund-analyzer
 description: 宏利复兴伟业灵活配置混合C (017612) 智能交易助手 - 基于T+1规则、基金经理画像、AI产业链的综合分析系统，支持飞书多维表格共享知识库
 ---
 
-# 宏利复兴基金交易助手 v3.0
+# 宏利复兴基金交易助手 v3.1
 
 > 📚 基于深度学习构建：交易规则 + 基金经理画像 + AI产业链监控 + 飞书知识库共享
+> 🔄 **v3.1 更新**：引入 Coze 工作流架构，YAML 编排，节点化执行
+
+---
+
+## 🏗️ 工作流架构 (v3.1 新特性)
+
+学习自 [Coze 扣子](https://www.coze.cn) 的工作流设计理念，实现可视化编排：
+
+```
+定时触发(14:30) → 获取基金数据 → 获取沪深300 → 计算收益率
+                                                        ↓
+发送通知 ← 生成交易建议 ← LLM推理 ← 加载AI产业链数据
+                                                        ↓
+飞书同步 ← 保存建议 ← 检测紧急预警
+```
+
+### 节点类型
+| 节点 | 功能 | 示例 |
+|:---|:---|:---|
+| `api_call` | 获取基金/市场数据 | 天天基金网、新浪财经 |
+| `code` | 计算收益率 | Python 计算持仓收益 |
+| `llm_reasoning` | 生成交易建议 | Kimi 分析并给出操作建议 |
+| `selector` | 紧急预警检测 | 波动>±3%触发预警 |
+| `database_write` | 同步飞书 | 写入多维表格 |
+| `notify` | 发送用户通知 | 推送交易建议 |
+
+### 配置文件
+- `metadata.json` - Skill 元数据（轻量加载）
+- `workflow.yaml` - 工作流定义（可视化编排）
+- `SKILL.md` - 详细文档（按需加载）
 
 ---
 
@@ -295,7 +325,10 @@ cat /root/.openclaw/workspace/alert_log.json | jq .
 └── TEMPLAR-003458-FINAL-COMPLETE.md  # 原始分析报告
 
 /root/.openclaw/skills/templar-fund-analyzer/
-└── SKILL.md                     # 本文档
+├── SKILL.md                     # 本文档
+├── metadata.json                # Skill元数据（v3.1新增）
+├── workflow.yaml                # 工作流定义（v3.1新增）
+└── workflow_engine.py           # 工作流引擎（引用eap3的引擎）
 ```
 
 ---
@@ -307,6 +340,7 @@ cat /root/.openclaw/workspace/alert_log.json | jq .
 | v1.0 | 2026-03-08 | 基础周五效应策略 |
 | v2.0 | 2026-03-08 | 修正T+1规则，加入14:30提醒 |
 | v3.0 | 2026-03-08 | 加入基金经理画像、AI产业链监控、实时预警、飞书知识库 |
+| v3.1 | 2026-03-10 | **引入Coze工作流架构**：metadata + YAML编排 + 节点化执行 |
 
 ---
 
