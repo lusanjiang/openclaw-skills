@@ -368,6 +368,22 @@ class EAP3AutoApproverV2:
         except:
             return None
 
+    def should_auto_approve(self, pending):
+        """检查是否超过30分钟，应该自动审批"""
+        try:
+            saved_time = datetime.fromisoformat(pending.get('timestamp', ''))
+            elapsed = (datetime.now() - saved_time).total_seconds()
+            elapsed_minutes = elapsed / 60
+            if elapsed_minutes >= 30:
+                self.log(f"⚠️ 已等待 {elapsed_minutes:.0f} 分钟，超过30分钟，将自动审批")
+                return True
+            else:
+                remaining = 30 - elapsed_minutes
+                self.log(f"⏳ 已等待 {elapsed_minutes:.0f} 分钟，还剩 {remaining:.0f} 分钟自动审批")
+                return False
+        except:
+            return False
+
     def clear_pending_approval(self):
         """清除待确认记录"""
         if PENDING_FILE.exists():
@@ -576,8 +592,13 @@ class EAP3AutoApproverV2:
             if not pending:
                 self.log("没有待确认的审批记录")
                 return True
-
+            
+            # 检查是否超过30分钟
+            auto_approve = self.should_auto_approve(pending)
+            
             self.log(f"\n[待确认审批] 加载 {pending['count']} 条记录...")
+            if auto_approve:
+                self.log("🤖 超过30分钟无回复，启动自动审批模式")
 
             await self.init_browser()
             try:
