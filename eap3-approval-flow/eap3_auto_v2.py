@@ -482,26 +482,15 @@ class EAP3AutoApproverV2:
                 self.log("没有待办需要处理")
                 return True
                 
-            # 分类
+            # 分类 - 只有福建/江西需要确认，其他（含浙江）仅提示
             fujian_jiangxi_todos = [t for t in todos if t['region'] in ['福建', '江西']]
-            zhejiang_todos = [t for t in todos if t['region'] == '浙江']
-            other_todos = [t for t in todos if t['region'] == '其他']
+            zhejiang_todos = [t for t in todos if t['region'] in ['浙江', '其他']]
             
             self.log(f"\n分类结果:")
             self.log(f"  - 福建/江西 (需确认+物料): {len(fujian_jiangxi_todos)} 条")
-            self.log(f"  - 浙江 (仅提示): {len(zhejiang_todos)} 条")
-            self.log(f"  - 其他省份 (自动): {len(other_todos)} 条")
+            self.log(f"  - 浙江/其他 (仅提示): {len(zhejiang_todos)} 条")
             
-            # 5. 先处理其他省份（自动审批）
-            if other_todos:
-                self.log(f"\n[自动审批] 开始处理其他省份 {len(other_todos)} 条...")
-                auto_success = 0
-                for i, todo in enumerate(other_todos, 1):
-                    if await self.approve_one(todo, i, len(other_todos)):
-                        auto_success += 1
-                self.log(f"✓ 自动审批完成: {auto_success}/{len(other_todos)} 条")
-            
-            # 6. 处理浙江（仅提示，不处理）
+            # 5. 处理浙江/其他（仅提示，不审批）
             if zhejiang_todos:
                 self.log(f"\n[浙江待办] 共 {len(zhejiang_todos)} 条，仅提示不处理")
                 print("\n" + "=" * 60)
