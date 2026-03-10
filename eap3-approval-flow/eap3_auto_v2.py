@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 EAP3 XZ38审批自动化 v2.0 - 区域筛选+确认模式
-福建/江西人员：发送通知+物料详情，等待确认
-浙江人员：仅提示，不处理
-其他省份：自动审批
+福建/江西人员：发送通知等待确认（并发物料信息）
+其他省份（含浙江）：自动审批
 """
 
 import asyncio
@@ -24,14 +23,9 @@ LOG_DIR = Path("/root/.openclaw/logs")
 PENDING_FILE = Path("/tmp/eap3_pending_approval.json")
 REQUIRED_PACKAGES = ["playwright", "requests"]
 
-# 飞书多维表格配置
-FEISHU_APP_TOKEN = "B7Etbij3Haq9arsLwjectXzSnAg"
-FEISHU_TABLE_ID = "tblGEKN97LhSOWCz"
-
-# 福建/江西人员名单（需要确认+物料详情）
+# 福建/江西人员名单（需要确认）
 FUJIAN_USERS = ["茅智伟", "谢品", "林志伟", "吴国强", "黄丽萍", "何超阳", "唐悠梅"]
 JIANGXI_USERS = ["肖培坤", "程明锦", "李志辉", "江伟康", "熊澄伟", "刘荣德", "胡洪箭", "朱海平", "陈毅"]
-ZHEJIANG_USERS = []
 REGIONAL_USERS = set(FUJIAN_USERS + JIANGXI_USERS)
 
 class EAP3AutoApproverV2:
@@ -44,97 +38,6 @@ class EAP3AutoApproverV2:
     def log(self, msg, level="INFO"):
         timestamp = datetime.now().strftime('%H:%M:%S')
         print(f"[{timestamp}] [{level}] {msg}")
-        
-    def get_feishu_token(self):
-        """获取飞书 tenant_access_token"""
-        try:
-            resp = requests.post(
-                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-                json={"app_id": "cli_a92802f9d5b8dbc7", "app_secret": "ogHsCEiMVTSBNcuyBgVY3crjYKWI8Hx0"},
-                timeout=10
-            )
-            data = resp.json()
-            return data.get("tenant_access_token")
-        except Exception as e:
-            self.log(f"获取飞书token失败: {e}", "ERROR")
-            return None
-    
-    def check_record_exists(self, doc_no):
-        """检查单据编号是否已存在于飞书表格中"""
-        token = self.get_feishu_token()
-        if not token:
-            return False
-        
-        try:
-            # 使用 filter 参数查询特定单据编号
-            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_TABLE_ID}/records"
-            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-            
-            # 查询条件：单据编号等于 doc_no
-            params = {
-                "filter": f'CurrentValue.[单据编号] = "{doc_no}"',
-                "page_size": 1
-            }
-            
-            resp = requests.get(url, headers=headers, params=params, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                records = data.get("data", {}).get("items", [])
-                exists = len(records) > 0
-                if exists:
-                    self.log(f"⚠️ 单据 {doc_no} 已存在，跳过写入")
-                return exists
-            else:
-                self.log(f"查询飞书表格失败: {resp.text}", "ERROR")
-                return False
-        except Exception as e:
-            self.log(f"查询飞书表格异常: {e}", "ERROR")
-            return False
-    
-    def write_to_bitable(self, record_data):
-        """写入飞书多维表格（带去重）"""
-        doc_no = record_data.get("doc_no", "")
-        
-        # 先去重检查
-        if self.check_record_exists(doc_no):
-            return True  # 已存在，视为成功
-        
-        token = self.get_feishu_token()
-        if not token:
-            return False
-        
-        try:
-            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_TABLE_ID}/records"
-            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-            
-            # 构建字段数据
-            fields = {
-                "单据编号": doc_no,
-                "申请人": record_data.get("applicant", ""),
-                "省份": record_data.get("region", ""),
-                "状态": record_data.get("status", ""),
-                "审批时间": int(datetime.now().timestamp() * 1000) if record_data.get("status") == "已审批" else None,
-                "客户名称": record_data.get("customer", ""),
-                "定制系列": record_data.get("series", ""),
-                "定制描述": record_data.get("description", ""),
-                "生产公司": record_data.get("company", ""),
-                "物料信息": record_data.get("material_info", ""),
-                "文本": doc_no
-            }
-            
-            # 移除空值
-            fields = {k: v for k, v in fields.items() if v is not None and v != ""}
-            
-            resp = requests.post(url, headers=headers, json={"fields": fields}, timeout=10)
-            if resp.status_code == 200:
-                self.log(f"✓ 已写入飞书多维表格: {doc_no}")
-                return True
-            else:
-                self.log(f"✗ 写入飞书失败: {resp.text}", "ERROR")
-                return False
-        except Exception as e:
-            self.log(f"✗ 写入飞书异常: {e}", "ERROR")
-            return False
         
     def ensure_dependencies(self):
         """确保所有依赖已安装"""
@@ -224,8 +127,6 @@ class EAP3AutoApproverV2:
             return "福建"
         elif applicant in JIANGXI_USERS:
             return "江西"
-        elif applicant in ZHEJIANG_USERS:
-            return "浙江"
         else:
             return "其他"
             
@@ -491,7 +392,18 @@ class EAP3AutoApproverV2:
             # 步骤4: 点击"办理"
             self.log("  步骤4: 办理...")
             try:
-                await self.page.click('button.blue:has-text("办理")', timeout=10000)
+                # 使用多种方式尝试点击"办理"按钮
+                await self.page.evaluate('''() => {
+                    const buttons = document.querySelectorAll('button');
+                    for (let btn of buttons) {
+                        const text = btn.innerText || btn.textContent || '';
+                        if (text.includes('办理') && !text.includes('接收')) {
+                            btn.click();
+                            return 'clicked';
+                        }
+                    }
+                    return 'not found';
+                }''')
                 self.log("    ✓ 点击办理")
             except Exception as e:
                 self.log(f"    ✗ 办理失败: {e}")
@@ -576,85 +488,39 @@ class EAP3AutoApproverV2:
                 self.log("没有待办需要处理")
                 return True
                 
-            # 分类 - 只有福建/江西需要确认，其他（含浙江）仅提示
-            fujian_jiangxi_todos = [t for t in todos if t['region'] in ['福建', '江西']]
-            zhejiang_todos = [t for t in todos if t['region'] in ['浙江', '其他']]
+            # 分类
+            regional_todos = [t for t in todos if t['region'] in ['福建', '江西']]
+            other_todos = [t for t in todos if t['region'] == '其他']
             
             self.log(f"\n分类结果:")
-            self.log(f"  - 福建/江西 (需确认+物料): {len(fujian_jiangxi_todos)} 条")
-            self.log(f"  - 浙江/其他 (仅提示): {len(zhejiang_todos)} 条")
+            self.log(f"  - 福建/江西 (需确认): {len(regional_todos)} 条")
+            self.log(f"  - 其他省份 (自动): {len(other_todos)} 条")
             
-            # 5. 处理浙江/其他（仅提示，不审批）
-            if zhejiang_todos:
-                self.log(f"\n[浙江待办] 共 {len(zhejiang_todos)} 条，仅提示不处理")
-                print("\n" + "=" * 60)
-                print("⚠️  检测到浙江区域XZ38待办（仅提示，不自动处理）：")
-                print("=" * 60)
-                for i, todo in enumerate(zhejiang_todos, 1):
-                    print(f"\n【{i}】单据编号: {todo.get('title', '未知')}")
-                    print(f"    申请人: {todo['applicant']} (浙江)")
-                    
-                    # 写入飞书多维表格（状态：浙江-仅提示）
-                    record = {
-                        "doc_no": todo.get('title', ''),
-                        "applicant": todo['applicant'],
-                        "region": "浙江",
-                        "status": "浙江-仅提示",
-                        "customer": "",
-                        "series": "",
-                        "description": "",
-                        "company": "",
-                        "material_info": ""
-                    }
-                    self.write_to_bitable(record)
-                print("\n" + "=" * 60 + "\n")
+            # 5. 先处理其他省份（自动审批）
+            if other_todos:
+                self.log(f"\n[自动审批] 开始处理其他省份 {len(other_todos)} 条...")
+                auto_success = 0
+                for i, todo in enumerate(other_todos, 1):
+                    if await self.approve_one(todo, i, len(other_todos)):
+                        auto_success += 1
+                self.log(f"✓ 自动审批完成: {auto_success}/{len(other_todos)} 条")
                 
-            # 7. 处理福建/江西（发送通知等待确认+物料详情）
-            if fujian_jiangxi_todos:
-                self.log(f"\n[区域待办] 福建/江西共 {len(fujian_jiangxi_todos)} 条，提取详情并发送通知...")
+            # 6. 处理福建/江西（发送通知等待确认）
+            if regional_todos:
+                self.log(f"\n[区域待办] 福建/江西共 {len(regional_todos)} 条，提取详情并发送通知...")
                 
                 # 提取每个待办的详细信息
-                for todo in fujian_jiangxi_todos:
+                for todo in regional_todos:
                     details = await self.extract_form_details(todo)
                     todo['form_details'] = details
                     await self.page.wait_for_timeout(2000)  # 等待页面稳定
-                
-                # 写入飞书多维表格（状态：待确认）
-                for todo in fujian_jiangxi_todos:
-                    details = todo.get('form_details', {})
-                    materials = details.get('materials', [])
-                    
-                    # 构建物料信息
-                    material_info = ""
-                    series = ""
-                    description = ""
-                    company = ""
-                    if materials:
-                        mat = materials[0]  # 取第一条物料
-                        series = mat.get('series', '')
-                        description = mat.get('description', '')
-                        company = mat.get('company', '')
-                        material_info = f"{series} | {description} | {company}"
-                    
-                    record = {
-                        "doc_no": todo.get('title', ''),
-                        "applicant": todo['applicant'],
-                        "region": todo['region'],
-                        "status": "待确认",
-                        "customer": details.get('customer', ''),
-                        "series": series,
-                        "description": description,
-                        "company": company,
-                        "material_info": material_info
-                    }
-                    self.write_to_bitable(record)
                 
                 # 输出通知信息（会被OpenClaw捕获发送到聊天）
                 print("\n" + "=" * 60)
                 print("📋 检测到福建/江西区域XZ38待办，请确认是否审批：")
                 print("=" * 60)
                 
-                for i, todo in enumerate(fujian_jiangxi_todos, 1):
+                for i, todo in enumerate(regional_todos, 1):
                     details = todo.get('form_details', {})
                     materials = details.get('materials', [])
                     
@@ -677,13 +543,12 @@ class EAP3AutoApproverV2:
                 print("=" * 60 + "\n")
                 
                 # 保存待确认列表
-                self.save_pending_approval(fujian_jiangxi_todos)
+                self.save_pending_approval(regional_todos)
                 
                 self.log("✓ 已发送确认通知，等待用户指令...")
                 return True  # 返回成功，等待用户确认
             else:
-                if not zhejiang_todos:
-                    self.log("\n✓ 全部处理完成（无福建/江西待办）")
+                self.log("\n✓ 全部处理完成（无福建/江西待办）")
                 return True
                 
         finally:
