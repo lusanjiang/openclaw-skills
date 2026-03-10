@@ -23,6 +23,12 @@ LOG_DIR = Path("/root/.openclaw/logs")
 PENDING_FILE = Path("/tmp/eap3_pending_approval.json")
 REQUIRED_PACKAGES = ["playwright", "requests"]
 
+# 飞书多维表格配置
+FEISHU_APP_TOKEN = "B7Etbij3Haq9arsLwjectXzSnAg"
+FEISHU_TABLE_ID = "tblGEKN97LhSOWCz"
+FEISHU_APP_ID = "cli_a92802f9d5b8dbc7"
+FEISHU_APP_SECRET = "ogHsCEiMVTSBNcuyBgVY3crjYKWI8Hx0"
+
 # 福建/江西人员名单（需要确认）
 FUJIAN_USERS = ["茅智伟", "谢品", "林志伟", "吴国强", "黄丽萍", "何超阳", "唐悠梅"]
 JIANGXI_USERS = ["肖培坤", "程明锦", "李志辉", "江伟康", "熊澄伟", "刘荣德", "胡洪箭", "朱海平", "陈毅"]
@@ -98,6 +104,101 @@ class EAP3AutoApproverV2:
             self.log(f"✗ 登录异常: {e}", "ERROR")
             return False
 
+    def get_feishu_token(self):
+        """获取飞书 tenant_access_token"""
+        try:
+            resp = requests.post(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET},
+                timeout=10
+            )
+            data = resp.json()
+            return data.get("tenant_access_token")
+        except Exception as e:
+            self.log(f"获取飞书token失败: {e}", "ERROR")
+            return None
+
+    def check_record_exists(self, doc_no):
+        """检查单据编号是否已存在于飞书表格中（去重）"""
+        token = self.get_feishu_token()
+        if not token:
+            return False
+        try:
+            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_TABLE_ID}/records"
+            headers = {"Authorization": f"Bearer {token}"}
+            params = {
+                "filter": f'CurrentValue.[单据编号] = "{doc_no}"',
+                "page_size": 1
+            }
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                records = data.get("data", {}).get("items", [])
+                exists = len(records) > 0
+                if exists:
+                    self.log(f"⚠️ 单据 {doc_no[:30]}... 已存在，跳过")
+                return exists
+            return False
+        except Exception as e:
+            self.log(f"查询飞书表格失败: {e}", "ERROR")
+            return False
+
+    def write_to_feishu(self, record_data):
+        """写入飞书多维表格（带去重）"""
+        doc_no = record_data.get("doc_no", "")
+        if self.check_record_exists(doc_no):
+            return True
+        
+        token = self.get_feishu_token()
+        if not token:
+            return False
+        
+        try:
+            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_TABLE_ID}/records"
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            
+            fields = {
+                "单据编号": doc_no,
+                "申请人": record_data.get("applicant", ""),
+                "省份": record_data.get("region", ""),
+                "状态": record_data.get("status", ""),
+                "审批时间": int(datetime.now().timestamp() * 1000) if record_data.get("status") == "已审批" else None,
+                "客户名称": record_data.get("customer", ""),
+                "定制系列": record_data.get("series", ""),
+                "定制描述": record_data.get("description", ""),
+                "生产公司": record_data.get("company", ""),
+                "物料信息": record_data.get("material_info", ""),
+                "文本": doc_no
+            }
+            fields = {k: v for k, v in fields.items() if v is not None and v != ""}
+            
+            resp = requests.post(url, headers=headers, json={"fields": fields}, timeout=10)
+            if resp.status_code == 200:
+                self.log(f"✓ 已记录到飞书: {doc_no[:30]}...")
+                return True
+            else:
+                self.log(f"✗ 写入飞书失败: {resp.text}", "ERROR")
+                return False
+        except Exception as e:
+            self.log(f"✗ 写入飞书异常: {e}", "ERROR")
+            return False
+
+    def cleanup_memory(self):
+        """清理内存，避免死机"""
+        self.log("清理内存...")
+        try:
+            import gc
+            gc.collect()
+            if self.browser:
+                asyncio.create_task(self.browser.close())
+                self.browser = None
+            if self.p:
+                asyncio.create_task(self.p.stop())
+                self.p = None
+            self.log("✓ 内存清理完成")
+        except Exception as e:
+            self.log(f"内存清理异常: {e}", "WARN")
+
     async def init_browser(self):
         """初始化浏览器"""
         from playwright.async_api import async_playwright
@@ -164,21 +265,21 @@ class EAP3AutoApproverV2:
         """打开表单并提取详细信息（优化版）"""
         task_id = todo.get('id')
         process_inst_id = todo.get('processInstId')
-        
+
         try:
             open_url = f"{EAP3_URL}/r/w?sid={self.sid}&cmd=CLIENT_BPM_FORM_MAIN_PAGE_OPEN&processInstId={process_inst_id}&taskInstId={task_id}&openState=1"
             await self.page.goto(open_url, timeout=30000)  # 减少到30秒
             await self.page.wait_for_load_state('networkidle', timeout=8000)  # 智能等待替代固定8秒
-            
+
             # 提取表单数据
             form_data = await self.page.evaluate('''() => {
                 const data = {};
-                
+
                 // 提取单据编号
-                const formNoEl = document.querySelector('[name="formNo"]') || 
+                const formNoEl = document.querySelector('[name="formNo"]') ||
                                   document.querySelector('input[value*="XZ38"]');
                 if (formNoEl) data.formNo = formNoEl.value || formNoEl.textContent;
-                
+
                 // 提取客户名称（简化版）
                 const labels = document.querySelectorAll('label');
                 for (let el of labels) {
@@ -190,24 +291,24 @@ class EAP3AutoApproverV2:
                         }
                     }
                 }
-                
+
                 // 提取物料表格数据
                 const materials = [];
                 const tables = document.querySelectorAll('table');
                 for (let table of tables) {
                     const firstRow = table.querySelector('tr');
                     if (!firstRow) continue;
-                    
+
                     const headers = firstRow.querySelectorAll('th, td');
                     let hasCustomSeries = false;
                     let hasCustomDesc = false;
-                    
+
                     for (let h of headers) {
                         const text = h.textContent || '';
                         if (text.includes('定制系列')) hasCustomSeries = true;
                         if (text.includes('定制描述')) hasCustomDesc = true;
                     }
-                    
+
                     if (hasCustomSeries && hasCustomDesc) {
                         const rows = table.querySelectorAll('tr');
                         for (let i = 1; i < rows.length && i <= 5; i++) {  // 最多取5行
@@ -224,13 +325,13 @@ class EAP3AutoApproverV2:
                         break;  // 找到第一个匹配的表格就退出
                     }
                 }
-                
+
                 data.materials = materials;
                 return data;
             }''')
-            
+
             return form_data
-            
+
         except Exception as e:
             self.log(f"提取表单详情失败: {e}", "WARN")
             return {}
@@ -426,6 +527,24 @@ class EAP3AutoApproverV2:
                     break
 
             self.log("  ✓ 审批完成")
+            
+            # 记录到飞书多维表格
+            try:
+                record = {
+                    "doc_no": title,
+                    "applicant": applicant,
+                    "region": region,
+                    "status": "已审批",
+                    "customer": material_info.get('customerName', ''),
+                    "series": material_info.get('customSeries', ''),
+                    "description": material_info.get('customDesc', ''),
+                    "company": material_info.get('producer', ''),
+                    "material_info": f"{material_info.get('customSeries', '')} | {material_info.get('customDesc', '')}"[:200]
+                }
+                self.write_to_feishu(record)
+            except Exception as e:
+                self.log(f"飞书记录失败: {e}", "WARN")
+            
             return True
 
         except Exception as e:
@@ -491,24 +610,44 @@ class EAP3AutoApproverV2:
                 self.log("没有待办需要处理")
                 return True
 
-            # 分类 - 福建/江西需确认，浙江和其他自动审批
+            # 分类 - 福建/江西需确认，浙江屏蔽，其他自动审批
             fujian_jiangxi_todos = [t for t in todos if t['region'] in ['福建', '江西']]
             zhejiang_todos = [t for t in todos if t['region'] in ['浙江']]
             other_todos = [t for t in todos if t['region'] not in ['福建', '江西', '浙江']]
-
+            
             self.log(f"\n分类结果:")
             self.log(f"  - 福建/江西 (需确认): {len(fujian_jiangxi_todos)} 条")
-            self.log(f"  - 浙江 (自动审批): {len(zhejiang_todos)} 条")
+            self.log(f"  - 浙江 (屏蔽): {len(zhejiang_todos)} 条")
             self.log(f"  - 其他省份 (自动审批): {len(other_todos)} 条")
-
-            # 5. 处理浙江（自动审批）
+            
+            # 5. 处理浙江（仅提示，屏蔽不处理）
             if zhejiang_todos:
-                self.log(f"\n[浙江自动审批] 开始处理 {len(zhejiang_todos)} 条...")
-                auto_success = 0
+                self.log(f"\n[浙江待办] 共 {len(zhejiang_todos)} 条，仅提示不处理")
+                print("\n" + "=" * 60)
+                print("⚠️  检测到浙江区域XZ38待办（已屏蔽，不自动处理）：")
+                print("=" * 60)
                 for i, todo in enumerate(zhejiang_todos, 1):
-                    if await self.approve_one(todo, i, len(zhejiang_todos)):
-                        auto_success += 1
-                self.log(f"✓ 浙江自动审批完成: {auto_success}/{len(zhejiang_todos)} 条")
+                    print(f"\n【{i}】单据编号: {todo.get('title', '未知')}")
+                    print(f"    申请人: {todo['applicant']} (浙江)")
+                    
+                    # 记录到飞书（状态：浙江-仅提示）
+                    try:
+                        record = {
+                            "doc_no": todo.get('title', ''),
+                            "applicant": todo['applicant'],
+                            "region": "浙江",
+                            "status": "浙江-仅提示",
+                            "customer": "",
+                            "series": "",
+                            "description": "",
+                            "company": "",
+                            "material_info": ""
+                        }
+                        self.write_to_feishu(record)
+                    except Exception as e:
+                        self.log(f"飞书记录浙江待办失败: {e}", "WARN")
+                    
+                print("\n" + "=" * 60 + "\n")
 
             # 6. 处理其他省份（自动审批）
             if other_todos:
@@ -558,6 +697,27 @@ class EAP3AutoApproverV2:
 
                 # 保存待确认列表
                 self.save_pending_approval(fujian_jiangxi_todos)
+                
+                # 记录到飞书多维表格（状态：待确认）
+                for todo in fujian_jiangxi_todos:
+                    try:
+                        details = todo.get('form_details', {})
+                        materials = details.get('materials', [])
+                        mat = materials[0] if materials else {}
+                        record = {
+                            "doc_no": todo.get('title', ''),
+                            "applicant": todo['applicant'],
+                            "region": todo['region'],
+                            "status": "待确认",
+                            "customer": details.get('customer', ''),
+                            "series": mat.get('series', ''),
+                            "description": mat.get('description', ''),
+                            "company": mat.get('company', ''),
+                            "material_info": f"{mat.get('series', '')} | {mat.get('description', '')}"[:200]
+                        }
+                        self.write_to_feishu(record)
+                    except Exception as e:
+                        self.log(f"飞书记录待确认状态失败: {e}", "WARN")
 
                 self.log("✓ 已发送确认通知，等待用户指令...")
                 return True  # 返回成功，等待用户确认
@@ -566,10 +726,15 @@ class EAP3AutoApproverV2:
                 return True
 
         finally:
+            # 关闭浏览器
             if self.browser:
                 await self.browser.close()
+                self.browser = None
             if self.p:
                 await self.p.stop()
+                self.p = None
+            # 清理内存
+            self.cleanup_memory()
 
 async def main():
     import argparse
