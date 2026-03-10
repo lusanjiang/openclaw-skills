@@ -495,29 +495,40 @@ class EAP3AutoApproverV2:
                 self.log("没有待办需要处理")
                 return True
                 
-            # 分类
-            regional_todos = [t for t in todos if t['region'] in ['福建', '江西']]
-            other_todos = [t for t in todos if t['region'] == '其他']
+            # 分类 - 福建/江西需确认，浙江和其他自动审批
+            fujian_jiangxi_todos = [t for t in todos if t['region'] in ['福建', '江西']]
+            zhejiang_todos = [t for t in todos if t['region'] in ['浙江']]
+            other_todos = [t for t in todos if t['region'] not in ['福建', '江西', '浙江']]
             
             self.log(f"\n分类结果:")
-            self.log(f"  - 福建/江西 (需确认): {len(regional_todos)} 条")
-            self.log(f"  - 其他省份 (自动): {len(other_todos)} 条")
+            self.log(f"  - 福建/江西 (需确认): {len(fujian_jiangxi_todos)} 条")
+            self.log(f"  - 浙江 (自动审批): {len(zhejiang_todos)} 条")
+            self.log(f"  - 其他省份 (自动审批): {len(other_todos)} 条")
             
-            # 5. 先处理其他省份（自动审批）
+            # 5. 处理浙江（自动审批）
+            if zhejiang_todos:
+                self.log(f"\n[浙江自动审批] 开始处理 {len(zhejiang_todos)} 条...")
+                auto_success = 0
+                for i, todo in enumerate(zhejiang_todos, 1):
+                    if await self.approve_one(todo, i, len(zhejiang_todos)):
+                        auto_success += 1
+                self.log(f"✓ 浙江自动审批完成: {auto_success}/{len(zhejiang_todos)} 条")
+            
+            # 6. 处理其他省份（自动审批）
             if other_todos:
-                self.log(f"\n[自动审批] 开始处理其他省份 {len(other_todos)} 条...")
+                self.log(f"\n[其他省份自动审批] 开始处理 {len(other_todos)} 条...")
                 auto_success = 0
                 for i, todo in enumerate(other_todos, 1):
                     if await self.approve_one(todo, i, len(other_todos)):
                         auto_success += 1
-                self.log(f"✓ 自动审批完成: {auto_success}/{len(other_todos)} 条")
+                self.log(f"✓ 其他省份自动审批完成: {auto_success}/{len(other_todos)} 条")
                 
             # 6. 处理福建/江西（发送通知等待确认）
-            if regional_todos:
-                self.log(f"\n[区域待办] 福建/江西共 {len(regional_todos)} 条，提取详情并发送通知...")
+            if fujian_jiangxi_todos:
+                self.log(f"\n[区域待办] 福建/江西共 {len(fujian_jiangxi_todos)} 条，提取详情并发送通知...")
                 
                 # 提取每个待办的详细信息
-                for todo in regional_todos:
+                for todo in fujian_jiangxi_todos:
                     details = await self.extract_form_details(todo)
                     todo['form_details'] = details
                     await self.page.wait_for_timeout(2000)  # 等待页面稳定
@@ -527,7 +538,7 @@ class EAP3AutoApproverV2:
                 print("📋 检测到福建/江西区域XZ38待办，请确认是否审批：")
                 print("=" * 60)
                 
-                for i, todo in enumerate(regional_todos, 1):
+                for i, todo in enumerate(fujian_jiangxi_todos, 1):
                     details = todo.get('form_details', {})
                     materials = details.get('materials', [])
                     
@@ -550,7 +561,7 @@ class EAP3AutoApproverV2:
                 print("=" * 60 + "\n")
                 
                 # 保存待确认列表
-                self.save_pending_approval(regional_todos)
+                self.save_pending_approval(fujian_jiangxi_todos)
                 
                 self.log("✓ 已发送确认通知，等待用户指令...")
                 return True  # 返回成功，等待用户确认
