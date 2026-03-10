@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 EAP3 XZ38审批自动化 v2.0 - 区域筛选+确认模式
-福建/江西人员：发送通知等待确认（并发物料信息）
-其他省份（含浙江）：自动审批
+福建/江西人员：发送通知+物料详情，等待确认
+浙江人员：仅提示，不处理
+其他省份：自动审批
 """
 
 import asyncio
@@ -23,9 +24,11 @@ LOG_DIR = Path("/root/.openclaw/logs")
 PENDING_FILE = Path("/tmp/eap3_pending_approval.json")
 REQUIRED_PACKAGES = ["playwright", "requests"]
 
-# 福建/江西人员名单（需要确认）
+# 福建/江西人员名单（需要确认+物料详情）
 FUJIAN_USERS = ["茅智伟", "谢品", "林志伟", "吴国强", "黄丽萍", "何超阳", "唐悠梅"]
 JIANGXI_USERS = ["肖培坤", "程明锦", "李志辉", "江伟康", "熊澄伟", "刘荣德", "胡洪箭", "朱海平", "陈毅"]
+# 浙江人员（仅提示，不处理）
+ZHEJIANG_USERS = []
 REGIONAL_USERS = set(FUJIAN_USERS + JIANGXI_USERS)
 
 class EAP3AutoApproverV2:
@@ -127,6 +130,8 @@ class EAP3AutoApproverV2:
             return "福建"
         elif applicant in JIANGXI_USERS:
             return "江西"
+        elif applicant in ZHEJIANG_USERS:
+            return "浙江"
         else:
             return "其他"
             
@@ -478,11 +483,13 @@ class EAP3AutoApproverV2:
                 return True
                 
             # 分类
-            regional_todos = [t for t in todos if t['region'] in ['福建', '江西']]
+            fujian_jiangxi_todos = [t for t in todos if t['region'] in ['福建', '江西']]
+            zhejiang_todos = [t for t in todos if t['region'] == '浙江']
             other_todos = [t for t in todos if t['region'] == '其他']
             
             self.log(f"\n分类结果:")
-            self.log(f"  - 福建/江西 (需确认): {len(regional_todos)} 条")
+            self.log(f"  - 福建/江西 (需确认+物料): {len(fujian_jiangxi_todos)} 条")
+            self.log(f"  - 浙江 (仅提示): {len(zhejiang_todos)} 条")
             self.log(f"  - 其他省份 (自动): {len(other_todos)} 条")
             
             # 5. 先处理其他省份（自动审批）
@@ -493,13 +500,24 @@ class EAP3AutoApproverV2:
                     if await self.approve_one(todo, i, len(other_todos)):
                         auto_success += 1
                 self.log(f"✓ 自动审批完成: {auto_success}/{len(other_todos)} 条")
+            
+            # 6. 处理浙江（仅提示，不处理）
+            if zhejiang_todos:
+                self.log(f"\n[浙江待办] 共 {len(zhejiang_todos)} 条，仅提示不处理")
+                print("\n" + "=" * 60)
+                print("⚠️  检测到浙江区域XZ38待办（仅提示，不自动处理）：")
+                print("=" * 60)
+                for i, todo in enumerate(zhejiang_todos, 1):
+                    print(f"\n【{i}】单据编号: {todo.get('title', '未知')}")
+                    print(f"    申请人: {todo['applicant']} (浙江)")
+                print("\n" + "=" * 60 + "\n")
                 
-            # 6. 处理福建/江西（发送通知等待确认）
-            if regional_todos:
-                self.log(f"\n[区域待办] 福建/江西共 {len(regional_todos)} 条，提取详情并发送通知...")
+            # 7. 处理福建/江西（发送通知等待确认+物料详情）
+            if fujian_jiangxi_todos:
+                self.log(f"\n[区域待办] 福建/江西共 {len(fujian_jiangxi_todos)} 条，提取详情并发送通知...")
                 
                 # 提取每个待办的详细信息
-                for todo in regional_todos:
+                for todo in fujian_jiangxi_todos:
                     details = await self.extract_form_details(todo)
                     todo['form_details'] = details
                     await self.page.wait_for_timeout(2000)  # 等待页面稳定
@@ -509,7 +527,7 @@ class EAP3AutoApproverV2:
                 print("📋 检测到福建/江西区域XZ38待办，请确认是否审批：")
                 print("=" * 60)
                 
-                for i, todo in enumerate(regional_todos, 1):
+                for i, todo in enumerate(fujian_jiangxi_todos, 1):
                     details = todo.get('form_details', {})
                     materials = details.get('materials', [])
                     
@@ -532,12 +550,13 @@ class EAP3AutoApproverV2:
                 print("=" * 60 + "\n")
                 
                 # 保存待确认列表
-                self.save_pending_approval(regional_todos)
+                self.save_pending_approval(fujian_jiangxi_todos)
                 
                 self.log("✓ 已发送确认通知，等待用户指令...")
                 return True  # 返回成功，等待用户确认
             else:
-                self.log("\n✓ 全部处理完成（无福建/江西待办）")
+                if not zhejiang_todos:
+                    self.log("\n✓ 全部处理完成（无福建/江西待办）")
                 return True
                 
         finally:
