@@ -59,8 +59,46 @@ class EAP3AutoApproverV2:
             self.log(f"获取飞书token失败: {e}", "ERROR")
             return None
     
+    def check_record_exists(self, doc_no):
+        """检查单据编号是否已存在于飞书表格中"""
+        token = self.get_feishu_token()
+        if not token:
+            return False
+        
+        try:
+            # 使用 filter 参数查询特定单据编号
+            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_TABLE_ID}/records"
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            
+            # 查询条件：单据编号等于 doc_no
+            params = {
+                "filter": f'CurrentValue.[单据编号] = "{doc_no}"',
+                "page_size": 1
+            }
+            
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                records = data.get("data", {}).get("items", [])
+                exists = len(records) > 0
+                if exists:
+                    self.log(f"⚠️ 单据 {doc_no} 已存在，跳过写入")
+                return exists
+            else:
+                self.log(f"查询飞书表格失败: {resp.text}", "ERROR")
+                return False
+        except Exception as e:
+            self.log(f"查询飞书表格异常: {e}", "ERROR")
+            return False
+    
     def write_to_bitable(self, record_data):
-        """写入飞书多维表格"""
+        """写入飞书多维表格（带去重）"""
+        doc_no = record_data.get("doc_no", "")
+        
+        # 先去重检查
+        if self.check_record_exists(doc_no):
+            return True  # 已存在，视为成功
+        
         token = self.get_feishu_token()
         if not token:
             return False
@@ -71,7 +109,7 @@ class EAP3AutoApproverV2:
             
             # 构建字段数据
             fields = {
-                "单据编号": record_data.get("doc_no", ""),
+                "单据编号": doc_no,
                 "申请人": record_data.get("applicant", ""),
                 "省份": record_data.get("region", ""),
                 "状态": record_data.get("status", ""),
@@ -81,7 +119,7 @@ class EAP3AutoApproverV2:
                 "定制描述": record_data.get("description", ""),
                 "生产公司": record_data.get("company", ""),
                 "物料信息": record_data.get("material_info", ""),
-                "文本": record_data.get("doc_no", "")
+                "文本": doc_no
             }
             
             # 移除空值
@@ -89,7 +127,7 @@ class EAP3AutoApproverV2:
             
             resp = requests.post(url, headers=headers, json={"fields": fields}, timeout=10)
             if resp.status_code == 200:
-                self.log(f"✓ 已写入飞书多维表格: {record_data.get('doc_no', '')}")
+                self.log(f"✓ 已写入飞书多维表格: {doc_no}")
                 return True
             else:
                 self.log(f"✗ 写入飞书失败: {resp.text}", "ERROR")
