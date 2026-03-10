@@ -273,10 +273,14 @@ class EAP3AutoApproverV2:
             self.log("✓ 已清除待确认记录")
             
     async def extract_material_info(self):
-        """从表单页面提取物料详情"""
+        """从表单页面提取物料详情（过滤JS代码）"""
         try:
             # 尝试提取物料表格信息
             material_info = await self.page.evaluate('''() => {
+                // 先移除所有script和style标签，避免污染innerText
+                const scripts = document.querySelectorAll('script, style');
+                scripts.forEach(s => s.remove());
+                
                 const result = {
                     customSeries: '',
                     customDesc: '',
@@ -284,36 +288,39 @@ class EAP3AutoApproverV2:
                     customerName: ''
                 };
                 
-                // 查找物料表格
+                // 查找物料表格 - 只找包含定制系列和定制描述的表格
                 const tables = document.querySelectorAll('table');
                 for (let table of tables) {
-                    const rows = table.querySelectorAll('tr');
-                    for (let row of rows) {
-                        const cells = row.querySelectorAll('td, th');
-                        // 查找包含"定制系列"、"定制描述"等的行
-                        for (let i = 0; i < cells.length; i++) {
-                            const text = cells[i].innerText || '';
-                            if (text.includes('定制系列') && i + 1 < cells.length) {
-                                result.customSeries = cells[i + 1].innerText?.trim() || '';
-                            }
-                            if (text.includes('定制描述') && i + 1 < cells.length) {
-                                result.customDesc = cells[i + 1].innerText?.trim() || '';
-                            }
-                            if (text.includes('生产公司') && i + 1 < cells.length) {
-                                result.producer = cells[i + 1].innerText?.trim() || '';
+                    const headerText = table.innerText || '';
+                    // 只处理真正的物料表格（有定制系列和定制描述列）
+                    if (headerText.includes('定制系列') && headerText.includes('定制描述')) {
+                        const rows = table.querySelectorAll('tr');
+                        for (let row of rows) {
+                            const cells = row.querySelectorAll('td');
+                            if (cells.length >= 4) {
+                                // 只取第一行数据
+                                result.customSeries = cells[0]?.textContent?.trim().substring(0, 100) || '';
+                                result.producer = cells[1]?.textContent?.trim().substring(0, 50) || '';
+                                // 环保属性通常在第三列，我们跳过
+                                result.customDesc = cells[3]?.textContent?.trim().substring(0, 200) || '';
+                                break; // 只取第一行
                             }
                         }
                     }
                 }
                 
                 // 查找客户名称
-                const labels = document.querySelectorAll('label, td, div');
+                const labels = document.querySelectorAll('label');
                 for (let el of labels) {
-                    const text = el.innerText || '';
+                    const text = el.textContent || '';
                     if (text.includes('客户名称')) {
-                        const nextEl = el.nextElementSibling;
-                        if (nextEl) {
-                            result.customerName = nextEl.innerText?.trim() || '';
+                        const parent = el.parentElement;
+                        if (parent) {
+                            const nextText = parent.nextElementSibling?.textContent?.trim() || '';
+                            if (nextText && nextText.length < 100) {
+                                result.customerName = nextText;
+                                break;
+                            }
                         }
                     }
                 }
