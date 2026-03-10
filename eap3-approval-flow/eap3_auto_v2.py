@@ -631,33 +631,32 @@ class EAP3AutoApproverV2:
                 self.log("没有待办需要处理")
                 return True
 
-            # 分类 - 福建/江西需确认，浙江屏蔽，其他自动审批
+            # 分类 - 只有福建/江西需要处理，其他（含浙江）全部屏蔽
             fujian_jiangxi_todos = [t for t in todos if t['region'] in ['福建', '江西']]
-            zhejiang_todos = [t for t in todos if t['region'] in ['浙江']]
-            other_todos = [t for t in todos if t['region'] not in ['福建', '江西', '浙江']]
+            other_todos = [t for t in todos if t['region'] not in ['福建', '江西']]
             
             self.log(f"\n分类结果:")
             self.log(f"  - 福建/江西 (需确认): {len(fujian_jiangxi_todos)} 条")
-            self.log(f"  - 浙江 (屏蔽): {len(zhejiang_todos)} 条")
-            self.log(f"  - 其他省份 (自动审批): {len(other_todos)} 条")
+            self.log(f"  - 其他（含浙江）(屏蔽): {len(other_todos)} 条")
             
-            # 5. 处理浙江（仅提示，屏蔽不处理）
-            if zhejiang_todos:
-                self.log(f"\n[浙江待办] 共 {len(zhejiang_todos)} 条，仅提示不处理")
+            # 5. 处理其他（含浙江，全部屏蔽不处理）
+            if other_todos:
+                self.log(f"\n[其他待办] 共 {len(other_todos)} 条，全部屏蔽不处理")
                 print("\n" + "=" * 60)
-                print("⚠️  检测到浙江区域XZ38待办（已屏蔽，不自动处理）：")
+                print("⚠️  检测到非福建/江西区域XZ38待办（已屏蔽，不自动处理）：")
                 print("=" * 60)
-                for i, todo in enumerate(zhejiang_todos, 1):
+                for i, todo in enumerate(other_todos, 1):
+                    region = todo.get('region', '未知')
                     print(f"\n【{i}】单据编号: {todo.get('title', '未知')}")
-                    print(f"    申请人: {todo['applicant']} (浙江)")
+                    print(f"    申请人: {todo['applicant']} ({region})")
                     
-                    # 记录到飞书（状态：浙江-仅提示）
+                    # 记录到飞书（状态：已屏蔽）
                     try:
                         record = {
                             "doc_no": todo.get('title', ''),
                             "applicant": todo['applicant'],
-                            "region": "浙江",
-                            "status": "浙江-仅提示",
+                            "region": region,
+                            "status": "已屏蔽",
                             "customer": "",
                             "series": "",
                             "description": "",
@@ -666,12 +665,9 @@ class EAP3AutoApproverV2:
                         }
                         self.write_to_feishu(record)
                     except Exception as e:
-                        self.log(f"飞书记录浙江待办失败: {e}", "WARN")
+                        self.log(f"飞书记录待办失败: {e}", "WARN")
                     
                 print("\n" + "=" * 60 + "\n")
-
-            # 6. 处理其他省份（自动审批）
-            if other_todos:
                 self.log(f"\n[其他省份自动审批] 开始处理 {len(other_todos)} 条...")
                 auto_success = 0
                 for i, todo in enumerate(other_todos, 1):
