@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
-EAP3 XZ38审批自动化 v2.0 - 区域筛选+确认模式
-福建/江西人员：发送通知等待确认（并发物料信息）
-其他省份（含浙江）：自动审批
+EAP3 XZ38审批自动化 v2.1 - 稳定性增强版
+改进内容：
+1. 增加审批后状态验证 - 二次查询确认单据已消失
+2. 增加重试机制 - 关键操作（点击确定）失败自动重试3次
+3. 增加详细日志 - 记录页面状态和操作响应
+4. 增加成功截图 - 审批完成后保存截图凭证
+5. 优化等待时间 - 点击确定后等待5秒确保提交完成
+
+区域筛选+确认模式：
+- 福建/江西人员：发送通知等待确认（30分钟超时自动审批）
+- 其他省份（含浙江）：自动审批
 """
 
 import asyncio
@@ -44,6 +52,79 @@ class EAP3AutoApproverV2:
     def log(self, msg, level="INFO"):
         timestamp = datetime.now().strftime('%H:%M:%S')
         print(f"[{timestamp}] [{level}] {msg}")
+
+    async def log_page_state(self, context=""):
+        """记录页面当前状态（URL和关键元素）"""
+        try:
+            url = self.page.url
+            self.log(f"  [页面状态] URL: {url[:80]}...", "DEBUG")
+            # 检查是否有确定按钮
+            has_confirm = await self.page.evaluate('''() => {
+                const btn = document.querySelector('.awsui-dialog button.blue, button:has-text("确定")');
+                return !!btn;
+            }''')
+            self.log(f"  [页面状态] 确定按钮存在: {has_confirm}", "DEBUG")
+            return {"url": url, "has_confirm": has_confirm}
+        except Exception as e:
+            self.log(f"  [页面状态] 获取失败: {e}", "DEBUG")
+            return {}
+
+    async def verify_approval_success(self, task_id, max_retries=3):
+        """验证审批是否成功 - 重新查询待办列表确认单据已消失"""
+        self.log("  [验证] 确认审批结果...")
+        for attempt in range(max_retries):
+            try:
+                # 重新获取待办列表
+                await self.page.goto(
+                    f"{EAP3_URL}/r/w?sid={self.sid}&cmd=com.actionsoft.apps.workbench_main_page",
+                    timeout=20000
+                )
+                await self.page.wait_for_load_state('networkidle', timeout=8000)
+                # 等待一下确保数据加载
+                await self.page.wait_for_timeout(2000)
+                
+                # 检查该task_id是否还在列表中
+                still_exists = await self.page.evaluate(f'''() => {{
+                    const data = window.firstPageData || [];
+                    const flat = [];
+                    data.forEach(item => {{
+                        if (Array.isArray(item)) flat.push(...item);
+                        else if (typeof item === 'object') flat.push(item);
+                    }});
+                    return flat.some(item => item.id === "{task_id}");
+                }}''')
+                
+                if not still_exists:
+                    self.log("  [验证] ✓ 确认成功 - 单据已从待办列表消失")
+                    return True
+                else:
+                    self.log(f"  [验证] ⚠️ 单据仍在列表中(尝试{attempt+1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        await self.page.wait_for_timeout(3000)  # 等待3秒后重试
+            except Exception as e:
+                self.log(f"  [验证] 检查失败(尝试{attempt+1}/{max_retries}): {e}", "WARN")
+        
+        self.log("  [验证] ✗ 验证失败 - 单据可能未成功审批", "ERROR")
+        return False
+
+    async def retry_operation(self, operation, max_retries=3, retry_delay=2, context=""):
+        """通用重试机制 - 对关键操作进行重试"""
+        for attempt in range(max_retries):
+            try:
+                self.log(f"  [{context}] 尝试 {attempt+1}/{max_retries}...")
+                result = await operation()
+                if result:
+                    self.log(f"  [{context}] ✓ 成功")
+                    return True
+            except Exception as e:
+                self.log(f"  [{context}] ✗ 失败(尝试{attempt+1}/{max_retries}): {str(e)[:100]}", "WARN")
+            
+            if attempt < max_retries - 1:
+                self.log(f"  [{context}] 等待{retry_delay}秒后重试...")
+                await self.page.wait_for_timeout(retry_delay * 1000)
+        
+        self.log(f"  [{context}] ✗ 全部{max_retries}次尝试失败", "ERROR")
+        return False
 
     def ensure_dependencies(self):
         """确保所有依赖已安装"""
@@ -456,7 +537,7 @@ class EAP3AutoApproverV2:
             }
 
     async def approve_one(self, todo, index, total):
-        """审批单个待办"""
+        """审批单个待办 - 带重试和验证"""
         task_id = todo.get('id')
         process_inst_id = todo.get('processInstId')
         title = todo.get('title', 'Unknown')[:50]
@@ -468,8 +549,8 @@ class EAP3AutoApproverV2:
 
         try:
             open_url = f"{EAP3_URL}/r/w?sid={self.sid}&cmd=CLIENT_BPM_FORM_MAIN_PAGE_OPEN&processInstId={process_inst_id}&taskInstId={task_id}&openState=1"
-            await self.page.goto(open_url, timeout=30000)  # 减少到30秒
-            await self.page.wait_for_load_state('networkidle', timeout=10000)  # 智能等待
+            await self.page.goto(open_url, timeout=30000)
+            await self.page.wait_for_load_state('networkidle', timeout=10000)
 
             # 并行提取物料信息和点击接收办理
             material_info = await self.extract_material_info()
@@ -482,9 +563,9 @@ class EAP3AutoApproverV2:
             try:
                 await self.page.click('.aws-form-main-toolbar button', timeout=8000)
                 self.log("    ✓ 点击接收办理")
-                await self.page.wait_for_timeout(2000)  # 减少到2秒
+                await self.page.wait_for_timeout(2000)
             except Exception as e:
-                self.log(f"    - 已接收或无需接收")
+                self.log(f"    - 已接收或无需接收: {str(e)[:50]}")
 
             # 步骤2: 确认对话框（快速检查）
             try:
@@ -510,12 +591,12 @@ class EAP3AutoApproverV2:
             except:
                 pass
 
-            await self.page.wait_for_timeout(1500)  # 减少到1.5秒
+            await self.page.wait_for_timeout(1500)
 
             # 步骤4: 点击"办理"
             self.log("  步骤3: 办理...")
-            try:
-                await self.page.evaluate('''() => {
+            async def click_handle():
+                return await self.page.evaluate('''() => {
                     const buttons = document.querySelectorAll('button');
                     for (let btn of buttons) {
                         const text = btn.innerText || btn.textContent || '';
@@ -526,23 +607,54 @@ class EAP3AutoApproverV2:
                     }
                     return false;
                 }''')
-                self.log("    ✓ 点击办理")
-            except Exception as e:
-                self.log(f"    ✗ 办理失败")
+            
+            handle_clicked = await self.retry_operation(click_handle, max_retries=2, retry_delay=2, context="点击办理")
+            if not handle_clicked:
+                self.log("    ✗ 办理按钮点击失败", "ERROR")
+                await self.page.screenshot(path=f"{LOG_DIR}/eap3_error_step3_{index}.png", full_page=True)
                 return False
+            self.log("    ✓ 点击办理")
 
-            await self.page.wait_for_timeout(3000)  # 减少到3秒
+            await self.page.wait_for_timeout(3000)
 
-            # 步骤5: 确认提交（快速模式）
+            # 步骤5: 确认提交 - 增加重试机制
             self.log("  步骤4: 确认...")
-            for i in range(2):  # 从3次减少到2次
+            
+            async def click_confirm():
                 try:
-                    await self.page.click('.awsui-dialog button.blue:has-text("确定")', timeout=2500)
-                    await self.page.wait_for_timeout(1000)  # 减少到1秒
+                    await self.page.click('.awsui-dialog button.blue:has-text("确定")', timeout=3000)
+                    return True
                 except:
-                    break
-
-            self.log("  ✓ 审批完成")
+                    # 尝试其他选择器
+                    try:
+                        await self.page.click('button:has-text("确定")', timeout=2000)
+                        return True
+                    except:
+                        return False
+            
+            # 使用重试机制点击确定，最多3次
+            confirm_clicked = await self.retry_operation(click_confirm, max_retries=3, retry_delay=2, context="点击确定")
+            
+            if not confirm_clicked:
+                self.log("  ✗ 确定按钮点击失败，审批可能未完成", "ERROR")
+                await self.page.screenshot(path=f"{LOG_DIR}/eap3_error_step4_{index}.png", full_page=True)
+                return False
+            
+            # 点击确定后等待更长时间确保提交完成
+            await self.page.wait_for_timeout(5000)
+            
+            self.log("  ✓ 审批流程完成")
+            
+            # 关键改进：验证审批是否真正成功
+            verified = await self.verify_approval_success(task_id)
+            
+            if not verified:
+                self.log("  ⚠️ 验证未通过，但流程已执行", "WARN")
+                await self.page.screenshot(path=f"{LOG_DIR}/eap3_warn_verify_{index}.png", full_page=True)
+            else:
+                # 成功截图留证
+                await self.page.screenshot(path=f"{LOG_DIR}/eap3_success_{index}_{datetime.now().strftime('%H%M%S')}.png", full_page=True)
+                self.log(f"  ✓ 成功截图已保存: eap3_success_{index}_{datetime.now().strftime('%H%M%S')}.png")
             
             # 记录到飞书多维表格
             try:
@@ -550,7 +662,7 @@ class EAP3AutoApproverV2:
                     "doc_no": title,
                     "applicant": applicant,
                     "region": region,
-                    "status": "已审批",
+                    "status": "已审批" if verified else "待确认",
                     "customer": material_info.get('customerName', ''),
                     "series": material_info.get('customSeries', ''),
                     "description": material_info.get('customDesc', ''),
@@ -561,11 +673,11 @@ class EAP3AutoApproverV2:
             except Exception as e:
                 self.log(f"飞书记录失败: {e}", "WARN")
             
-            return True
+            return verified
 
         except Exception as e:
             self.log(f"  ✗ 失败: {e}", "ERROR")
-            await self.page.screenshot(path=f"{LOG_DIR}/eap3_error_{index}.png", full_page=True)
+            await self.page.screenshot(path=f"{LOG_DIR}/eap3_error_{index}_{datetime.now().strftime('%H%M%S')}.png", full_page=True)
             return False
 
     async def run(self, approve_pending=False):
@@ -574,7 +686,8 @@ class EAP3AutoApproverV2:
         approve_pending: 是否审批之前保存的待确认列表
         """
         self.log("=" * 50)
-        self.log("EAP3 XZ38审批自动化 v2.0 - 区域筛选+确认模式")
+        self.log("EAP3 XZ38审批自动化 v2.1 - 稳定性增强版")
+        self.log("改进：状态验证 + 重试机制 + 详细日志 + 截图留证")
         self.log("=" * 50)
 
         # 1. 环境检查

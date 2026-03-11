@@ -1,12 +1,13 @@
 #!/bin/bash
-# EAP3定时审批任务 v2.0 - 区域筛选+确认模式
+# EAP3定时审批任务 v2.1 - 稳定性增强版
+# 改进：状态验证 + 重试机制 + 详细日志 + 截图留证
 # 福建/江西：通知用户等待确认（30分钟无回复自动审批）
 # 其他省份：自动审批
 
 LOG_FILE="/root/.openclaw/logs/eap3_cron.log"
 PENDING_FILE="/tmp/eap3_pending_approval.json"
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========== EAP3 v2.0 定时任务启动 ==========" | tee -a $LOG_FILE
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========== EAP3 v2.1 定时任务启动 ==========" | tee -a $LOG_FILE
 
 # 检查是否已有正在运行的任务
 PID_FILE="/tmp/eap3_cron.pid"
